@@ -3,12 +3,14 @@ __pycache__/
 *.py[codz]
 *$py.class
 
-# C extensions
-*.so
 
 # LTspice simulation raw data
 *.raw
 *.log
+
+# Ignore temp and plots folders
+/temp/*
+/plots/*
 
 # Distribution / packaging
 .Python
