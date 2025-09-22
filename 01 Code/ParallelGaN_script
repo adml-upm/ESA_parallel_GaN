@@ -2,10 +2,9 @@ from PyLTSpice import SimRunner
 from PyLTSpice import AscEditor
 from PyLTSpice import RawRead
 from PyLTSpice.log.ltsteps import LTSpiceLogReader
-import numpy as np
-import matplotlib.pyplot as plt
-import os
 import time
+from SimConfiguration import LtSimConfiguration
+from ResultPlotting import generate_sweep_plots
 
 def update_netlist_params(new_cnfg_dict: dict, netlist):
     for k, v in new_cnfg_dict.items():
@@ -20,39 +19,9 @@ LTC = SimRunner(output_folder='temp', simulator=None, parallel_sims=16, timeout=
 sim_path = './02 Simulations/02 ParallelGaN/ParGan_subckt_example.asc'
 netlist = AscEditor(sim_path)
 
-class LtSimConfiguration:
-    def __init__(self, base_config: dict = None):
-        if base_config:
-            self.base_cnfg_dict = base_config.copy()
-        else:
-            self.base_cnfg_dict = {}
-        self.config_ranges = {}
-
-    def add_param_with_range(self, param_name: str, range_vals: list, m_points: int=5, log_space:bool =False):
-        if not log_space:  # Default is linear space
-            self.config_ranges[param_name] = np.linspace(range_vals[0], range_vals[1], m_points)
-        else:
-            self.config_ranges[param_name] = np.geomspace(range_vals[0], range_vals[1], m_points)
-
-    def get_all_cnfgs_sequentially(self):
-        for param_name, param_range in self.config_ranges.items():
-            for param_value in param_range:
-                config = self.base_cnfg_dict.copy()
-                config[param_name] = param_value
-                yield config, {param_name: param_value}
-
-    def get_all_multiparam_cnfgs(self):
-        from itertools import product
-        keys, values = zip(*self.config_ranges.items())
-        for v in product(*values):
-            config = self.base_cnfg_dict.copy()
-            config.update(dict(zip(keys, v)))
-            yield config
-
-
 # Electrical testing setpoint:
 N_devices = 4
-m_points = 100
+m_points = 5
 V_DC = 100  # V
 I_DC = 10   # A
 # netlist.set_component_value('V_DC', f'{V_DC}')
@@ -82,12 +51,12 @@ base_config_dict = {
     'T_sw': T_sw,    
 }
 for i in range(1, N_devices + 1):   
-    base_config_dict[f"R_drain_{i}"] = '1m'
+    base_config_dict[f"R_drain_{i}"] = '1u'
     base_config_dict[f"L_drain_{i}"] = '1p'
 
 SimConfig = LtSimConfiguration(base_config=base_config_dict)
 SimConfig.add_param_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_points)
-SimConfig.add_param_with_range('L_drain_1', [1e-12, 100e-9], m_points=m_points, log_space=True)
+SimConfig.add_param_with_range('L_drain_1', [1e-12, 50e-9], m_points=m_points, log_space=True)
 
 # ---------------------------------------------------------------
 # .meas setup:
@@ -158,86 +127,17 @@ for raw, log in LTC:
 
 
 # Clean up temporary files (asc, net, log, raw)
-LTC.file_cleanup()
+#LTC.file_cleanup()
 
 end_time = time.time()
 print(f"Loop execution time: {end_time - start_time:.2f} seconds")
 
 
 params_to_plot = ['R_drain_1', 'L_drain_1']
-x_axis_scale = ['linear', 'log']
 skippable_branches = ['x3', 'x4']  # Skip measurements related to these HEMT branches
 
-for param_to_plot, scale in zip(params_to_plot, x_axis_scale):
-    # Collect measurement results for entries where param_to_plot is present in config_changes
-    x_axis_vals = []
-    meas_dict = {}
-
-    for entry in all_meas_results.values():
-        config_changes = entry.get('config_changes', {})
-        meas_results = entry.get('meas results', {})
-        if param_to_plot in config_changes:
-            r_val = config_changes[param_to_plot]
-            x_axis_vals.append(r_val)
-            for k, v in meas_results.items():
-                if any([skip_branch_str in k for skip_branch_str in skippable_branches]):
-                    continue  # Skip measurements related to this HEMT branch
-                if k not in meas_dict:
-                    meas_dict[k] = []
-                meas_dict[k].append(v)
-
-    # Sort by r_drain_vals for plotting
-    sorted_indices = np.argsort(x_axis_vals)
-    x_axis_vals = np.array(x_axis_vals)[sorted_indices]
-    meas_keys = list(meas_dict.keys())
-    meas_matrix = np.array([np.array(meas_dict[k])[sorted_indices] for k in meas_keys]).T
-
-    # Plot measurements with the same unit on the same vertically stacked subplot
-    unit_map = {
-        'current': 'A',
-        '_current': 'A',
-        '_v': 'V',
-        '_vds': 'V',
-        '_vgs': 'V',
-        '_p_': 'J',
-        '_P_on': 'J',
-        '_P_off': 'J',
-    }
-
-    # Group keys by unit
-    unit_groups = {}
-    for key in meas_keys:
-        unit = None
-        for k, v in unit_map.items():
-            if k in key:
-                unit = v
-                break
-        if unit is None:
-            unit = 'Value'
-        unit_groups.setdefault(unit, []).append(key)
-
-    n_units = len(unit_groups)
-    fig, axes = plt.subplots(n_units, 1, figsize=(10, 3 * n_units), sharex=True)
-    if n_units == 1:
-        axes = [axes]
-
-    for ax, (unit, keys) in zip(axes, unit_groups.items()):
-        for key in keys:
-            idx = meas_keys.index(key)
-            ax.plot(x_axis_vals, meas_matrix[:, idx], marker='o', label=key)
-        ax.set_ylabel(f'[{unit}]')
-        ax.set_xscale(scale)
-        ax.legend(loc='best')
-        ax.grid(True)
-
-    axes[-1].set_xlabel(f'{param_to_plot}')
-    plt.suptitle(f'Evolution of Measurements vs {param_to_plot}')
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-    output_folder = './plots'
-    os.makedirs(output_folder, exist_ok=True)
-
-    plot_path = os.path.join(output_folder, f'meas_evolution_vs_{param_to_plot}.png')
-    plt.savefig(plot_path)
-    plt.close()
+generate_sweep_plots(params_to_plot=params_to_plot, 
+                     all_meas_results=all_meas_results, 
+                     skippable_branches=skippable_branches,
+                     save_figs=True)
 
