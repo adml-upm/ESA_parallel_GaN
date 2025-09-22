@@ -1,0 +1,243 @@
+from PyLTSpice import SimRunner
+from PyLTSpice import AscEditor
+from PyLTSpice import RawRead
+from PyLTSpice.log.ltsteps import LTSpiceLogReader
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import time
+
+def update_netlist_params(new_cnfg_dict: dict, netlist):
+    for k, v in new_cnfg_dict.items():
+        netlist.set_parameter(k, v)
+
+# Force another simulatior
+simulator = r"C:\Users\Alex\AppData\Local\Programs\ADI\LTspice\LTspice.exe"
+
+# select spice model
+LTC = SimRunner(output_folder='temp', simulator=None, parallel_sims=16, timeout=30)
+
+sim_path = './02 Simulations/02 ParallelGaN/ParGan_subckt_example.asc'
+netlist = AscEditor(sim_path)
+
+class LtSimConfiguration:
+    def __init__(self, base_config: dict = None):
+        if base_config:
+            self.base_cnfg_dict = base_config.copy()
+        else:
+            self.base_cnfg_dict = {}
+        self.config_ranges = {}
+
+    def add_param_with_range(self, param_name: str, range_vals: list, m_points: int=5, log_space:bool =False):
+        if not log_space:  # Default is linear space
+            self.config_ranges[param_name] = np.linspace(range_vals[0], range_vals[1], m_points)
+        else:
+            self.config_ranges[param_name] = np.geomspace(range_vals[0], range_vals[1], m_points)
+
+    def get_all_cnfgs_sequentially(self):
+        for param_name, param_range in self.config_ranges.items():
+            for param_value in param_range:
+                config = self.base_cnfg_dict.copy()
+                config[param_name] = param_value
+                yield config, {param_name: param_value}
+
+    def get_all_multiparam_cnfgs(self):
+        from itertools import product
+        keys, values = zip(*self.config_ranges.items())
+        for v in product(*values):
+            config = self.base_cnfg_dict.copy()
+            config.update(dict(zip(keys, v)))
+            yield config
+
+
+# Electrical testing setpoint:
+N_devices = 4
+m_points = 100
+V_DC = 100  # V
+I_DC = 10   # A
+# netlist.set_component_value('V_DC', f'{V_DC}')
+# netlist.set_component_value('I_DC', f'{I_DC}')
+f_sw = 100e3
+T_sw = 1 / f_sw
+D_sw = 0.5
+T_on = D_sw * T_sw
+netlist.add_instructions(f".tran {2*T_sw*1e6}u")
+# ---------------------------------------------------------------
+# Gate Driver setup: 
+Vdrv_off = 0
+Vdrv_on = 5
+Vdrive_delay = 0
+tdrv_rise = 1e-9
+tdrv_fall = 1e-9
+T_on_corr = T_on-(tdrv_rise+tdrv_fall)/2
+T_off = T_sw - T_on - tdrv_rise - tdrv_fall
+T_off_corr = T_sw - T_on_corr
+for i in range(1, N_devices + 1):
+    netlist.set_component_value(f'Vgdrv{i}', f'PULSE({Vdrv_off} {Vdrv_on} {Vdrive_delay} {1e9*tdrv_rise:.3}n {1e9*tdrv_fall:.3}n {1e9*T_on_corr:.3}n {T_sw})')
+
+
+base_config_dict = {
+    'V_DC': V_DC,
+    'I_DC': I_DC,
+    'T_sw': T_sw,    
+}
+for i in range(1, N_devices + 1):   
+    base_config_dict[f"R_drain_{i}"] = '1m'
+    base_config_dict[f"L_drain_{i}"] = '1p'
+
+SimConfig = LtSimConfiguration(base_config=base_config_dict)
+SimConfig.add_param_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_points)
+SimConfig.add_param_with_range('L_drain_1', [1e-12, 100e-9], m_points=m_points, log_space=True)
+
+# ---------------------------------------------------------------
+# .meas setup:
+# Current balance measurements
+t_on_curr_meas = T_sw + tdrv_rise + T_on / 2  # Midway through on-time of second cycle
+# Power Loss measurements
+delta_t_loss_meas = min(500e-9, T_on*0.025)  # Shortly after turn-off of second cycle
+P_on_times = [T_sw, T_sw + delta_t_loss_meas]
+P_off_times = [T_sw, T_on + tdrv_rise + T_on + delta_t_loss_meas]
+# Vds Overshoot params
+Vds_pk_times = [T_sw + tdrv_rise + T_on, T_sw + tdrv_rise + T_on + T_off/2]
+# Vgs Overshoot params
+Vgs_pk_times = [T_sw, T_sw + tdrv_rise + T_on/2]
+
+for i in range(1, N_devices + 1):
+    loss_param = f"V(G{i})*Ix(X{i}:U1:gatein)+V(D{i})*Ix(X{i}:U1:drainin)+V(X{i}:hemt_s_noLs)*Ix(X{i}:U1:sourcein)"
+    netlist.add_instructions(
+        f".meas X{i}_cond_current FIND I(X{i}:R_drain) AT {1e6*t_on_curr_meas:.6}u",
+        f".meas X{i}_E_on INTEG {loss_param} FROM {1e6*P_on_times[0]:.6}u TO {1e6*P_on_times[1]:.6}u",
+        f".meas X{i}_E_off INTEG {loss_param} FROM {1e6*P_off_times[0]:.6}u TO {1e6*P_off_times[1]:.6}u",
+        f".meas X{i}_vds_pk MAX V(D{i},X{i}:hemt_s_noLs) FROM {1e6*Vds_pk_times[0]:.6}u TO {1e6*Vds_pk_times[1]:.6}u",
+        f".meas X{i}_vgs_pk MAX V(G{i},X{i}:hemt_s_noLs) FROM {1e6*Vgs_pk_times[0]:.6}u TO {1e6*Vgs_pk_times[1]:.6}u",        
+    )
+
+# ---------------------------------------------------------------
+
+# netlist.add_instructions(
+#     f".include {os.path.abspath('./02 Simulations/00 ComonLibs/EPCGaNLibrary.lib')}",
+#     f".include {os.path.abspath('./02 Simulations/00 ComonLibs/EPCGaN.asy')}"
+# )
+
+start_time = time.time()
+
+all_meas_results = {}
+
+for config, changed_params in SimConfig.get_all_cnfgs_sequentially():
+    # Update netlist and run sim    
+    update_netlist_params(config, netlist)
+    sim = LTC.run(netlist)
+    # Store the changed parameters for this sim
+    log_name = sim.netlist_file.name.rstrip('.asc')
+    all_meas_results[log_name] = {}
+    all_meas_results[log_name]['config_changes']= changed_params
+
+# Wait for all the sims launched. A timeout counter from last completed sim keeps track of stalled sims
+LTC.wait_completion()
+print('Successful/Total Simulations: ' + str(LTC.okSim) + '/' + str(LTC.runno))
+
+for raw, log in LTC:
+    # print("Raw file: %s, Log file: %s" % (raw, log))
+    # raw_data = RawRead(raw)
+    # i_drain_sw1_r = raw_data.get_trace('I(R1)')
+    # i_drain_sw1_l = raw_data.get_trace('I(x1:L_drain)')
+    # print(f"Trace length is {len(i_drain_sw1_r)} and they match: {i_drain_sw1_r == i_drain_sw1_l}")
+    # # print(raw_data.get_trace_names())
+    # time = list(raw_data.get_trace('time'))
+    # time = [abs(t) for t in time]  # Necessary due to LTSpice bug printing negative time sometimes
+    # print(f"Simulation time is {time[-1]}s, sim length is {len(time)} points")
+    
+    # Get the names of the variables that were stepped, and the measurements taken
+    log_data = LTSpiceLogReader(log)
+    # step_names = log_data.get_step_vars()
+
+    # Remove extra logged items, and convert single-item lists to values, save to dict
+    meas_results_dict = {k: v for k, v in log_data.dataset.items() if not k.endswith(('_to', '_from', '_at'))}
+    meas_results_dict = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in meas_results_dict.items()}
+    all_meas_results[log.stem]['meas results'] = meas_results_dict
+
+
+# Clean up temporary files (asc, net, log, raw)
+LTC.file_cleanup()
+
+end_time = time.time()
+print(f"Loop execution time: {end_time - start_time:.2f} seconds")
+
+
+params_to_plot = ['R_drain_1', 'L_drain_1']
+x_axis_scale = ['linear', 'log']
+skippable_branches = ['x3', 'x4']  # Skip measurements related to these HEMT branches
+
+for param_to_plot, scale in zip(params_to_plot, x_axis_scale):
+    # Collect measurement results for entries where param_to_plot is present in config_changes
+    x_axis_vals = []
+    meas_dict = {}
+
+    for entry in all_meas_results.values():
+        config_changes = entry.get('config_changes', {})
+        meas_results = entry.get('meas results', {})
+        if param_to_plot in config_changes:
+            r_val = config_changes[param_to_plot]
+            x_axis_vals.append(r_val)
+            for k, v in meas_results.items():
+                if any([skip_branch_str in k for skip_branch_str in skippable_branches]):
+                    continue  # Skip measurements related to this HEMT branch
+                if k not in meas_dict:
+                    meas_dict[k] = []
+                meas_dict[k].append(v)
+
+    # Sort by r_drain_vals for plotting
+    sorted_indices = np.argsort(x_axis_vals)
+    x_axis_vals = np.array(x_axis_vals)[sorted_indices]
+    meas_keys = list(meas_dict.keys())
+    meas_matrix = np.array([np.array(meas_dict[k])[sorted_indices] for k in meas_keys]).T
+
+    # Plot measurements with the same unit on the same vertically stacked subplot
+    unit_map = {
+        'current': 'A',
+        '_current': 'A',
+        '_v': 'V',
+        '_vds': 'V',
+        '_vgs': 'V',
+        '_p_': 'J',
+        '_P_on': 'J',
+        '_P_off': 'J',
+    }
+
+    # Group keys by unit
+    unit_groups = {}
+    for key in meas_keys:
+        unit = None
+        for k, v in unit_map.items():
+            if k in key:
+                unit = v
+                break
+        if unit is None:
+            unit = 'Value'
+        unit_groups.setdefault(unit, []).append(key)
+
+    n_units = len(unit_groups)
+    fig, axes = plt.subplots(n_units, 1, figsize=(10, 3 * n_units), sharex=True)
+    if n_units == 1:
+        axes = [axes]
+
+    for ax, (unit, keys) in zip(axes, unit_groups.items()):
+        for key in keys:
+            idx = meas_keys.index(key)
+            ax.plot(x_axis_vals, meas_matrix[:, idx], marker='o', label=key)
+        ax.set_ylabel(f'[{unit}]')
+        ax.set_xscale(scale)
+        ax.legend(loc='best')
+        ax.grid(True)
+
+    axes[-1].set_xlabel(f'{param_to_plot}')
+    plt.suptitle(f'Evolution of Measurements vs {param_to_plot}')
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+    output_folder = './plots'
+    os.makedirs(output_folder, exist_ok=True)
+
+    plot_path = os.path.join(output_folder, f'meas_evolution_vs_{param_to_plot}.png')
+    plt.savefig(plot_path)
+    plt.close()
+
