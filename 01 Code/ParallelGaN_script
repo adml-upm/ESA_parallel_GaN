@@ -4,11 +4,11 @@ from PyLTSpice import RawRead
 from PyLTSpice.log.ltsteps import LTSpiceLogReader
 import time
 from SimConfiguration import LtSimConfiguration
-from ResultPlotting import generate_sweep_plots
+from ResultPlotting import generate_sweep_plots, generate_perturbation_plots, generate_perturbation_heat_map
 
 def update_netlist_params(new_cnfg_dict: dict, netlist):
-    for k, v in new_cnfg_dict.items():
-        netlist.set_parameter(k, v)
+    for k in sorted(new_cnfg_dict.keys()):
+        netlist.set_parameter(k, new_cnfg_dict[k])
 
 # Force another simulatior
 simulator = r"C:\Users\Alex\AppData\Local\Programs\ADI\LTspice\LTspice.exe"
@@ -44,19 +44,57 @@ T_off_corr = T_sw - T_on_corr
 for i in range(1, N_devices + 1):
     netlist.set_component_value(f'Vgdrv{i}', f'PULSE({Vdrv_off} {Vdrv_on} {Vdrive_delay} {1e9*tdrv_rise:.3}n {1e9*tdrv_fall:.3}n {1e9*T_on_corr:.3}n {T_sw})')
 
-
 base_config_dict = {
     'V_DC': V_DC,
     'I_DC': I_DC,
     'T_sw': T_sw,    
 }
-for i in range(1, N_devices + 1):   
-    base_config_dict[f"R_drain_{i}"] = '1u'
-    base_config_dict[f"L_drain_{i}"] = '1p'
+for i in range(1, N_devices + 1): 
+    # HEMT cell params
+    base_config_dict[f"R_drain_{i}"] = '1m'
+    base_config_dict[f"L_drain_{i}"] = '1n'
+    base_config_dict[f"R_source_{i}"] = '1m'
+    base_config_dict[f"L_source_{i}"] = '1n'
+    # Parasitic PCB params
+    base_config_dict[f"R_pcb_branch_{i}"] = '1u'
+    # Driving circuit params
+    base_config_dict[f"Lg_uncommon_{i}"] = '500p'
+    base_config_dict[f"L_common_source_{i}"] = '10p'
+    base_config_dict[f"R_driver_{i}"] = '2'
+    base_config_dict[f"R_g_{i}"] = '1'
+    # Gate Driver params 
+    base_config_dict[f"Vdrv_off_{i}"] = Vdrv_off
+    base_config_dict[f"Vdrv_on_{i}"] = Vdrv_on
+    base_config_dict[f"Vdrive_delay_{i}"] = '0'
+    base_config_dict[f"tdrv_rise_{i}"] = tdrv_rise
+    base_config_dict[f"tdrv_fall_{i}"] = tdrv_fall
+    base_config_dict[f"T_on_corr_{i}"] = T_on_corr
 
-SimConfig = LtSimConfiguration(base_config=base_config_dict)
-SimConfig.add_param_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_points)
-SimConfig.add_param_with_range('L_drain_1', [1e-12, 50e-9], m_points=m_points, log_space=True)
+
+SIM_TYPE = 'sweep'  # 'sweep', 'perturbation', 'multiparam'
+if SIM_TYPE == 'sweep':
+    SimConfig = LtSimConfiguration(base_config=base_config_dict)
+    SimConfig.add_param_sweep_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_points)
+    SimConfig.add_param_sweep_with_range('L_drain_1', [500e-12, 50e-9], m_points=m_points, log_space=True)
+elif SIM_TYPE == 'perturbation':
+    SimConfig = LtSimConfiguration(base_config=base_config_dict)
+    SimConfig.default_Kperturb = 0.1  # Modify standar perturbation amount (p.u.)
+    # SimConfig.add_param_perturbation('L_drain_1', 10e-9)
+    # SimConfig.add_param_perturbation('R_drain_1', 1e-3)
+    SimConfig.add_param_perturbation("R_drain_1")
+    SimConfig.add_param_perturbation("L_drain_1")
+    SimConfig.add_param_perturbation("R_source_1")
+    SimConfig.add_param_perturbation("L_source_1")
+    SimConfig.add_param_perturbation("R_pcb_branch_1")
+    SimConfig.add_param_perturbation("Lg_uncommon_1")
+    SimConfig.add_param_perturbation("L_common_source_1")
+    # SimConfig.add_param_perturbation("R_driver_1")
+    # SimConfig.add_param_perturbation("R_g_1")
+    # SimConfig.add_param_perturbation('L_drain_1', 1e-3)
+elif SIM_TYPE == 'multiparam':
+    pass
+else:
+    raise ValueError("Invalid SIM_TYPE. Choose from 'sweep', 'perturbation', or 'multiparam'.")
 
 # ---------------------------------------------------------------
 # .meas setup:
@@ -89,10 +127,9 @@ for i in range(1, N_devices + 1):
 # )
 
 start_time = time.time()
-
 all_meas_results = {}
 
-for config, changed_params in SimConfig.get_all_cnfgs_sequentially():
+for config, changed_params in SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE):
     # Update netlist and run sim    
     update_netlist_params(config, netlist)
     sim = LTC.run(netlist)
@@ -127,17 +164,28 @@ for raw, log in LTC:
 
 
 # Clean up temporary files (asc, net, log, raw)
-#LTC.file_cleanup()
+LTC.file_cleanup()
 
 end_time = time.time()
 print(f"Loop execution time: {end_time - start_time:.2f} seconds")
 
 
-params_to_plot = ['R_drain_1', 'L_drain_1']
-skippable_branches = ['x3', 'x4']  # Skip measurements related to these HEMT branches
+if SIM_TYPE == 'sweep':
+    generate_sweep_plots(params_to_plot=SimConfig.params_to_plot, meas_res=all_meas_results,
+                         skip_branches=['x3', 'x4'], save_figs=True)
+elif SIM_TYPE == 'perturbation':
+    # generate_perturbation_plots(params_to_plot=SimConfig.params_to_plot, meas_res=all_meas_results,
+    #                      skip_branches=['x3', 'x4'], base_config=base_config_dict, save_figs=True)
+    generate_perturbation_heat_map(params_to_plot=SimConfig.params_to_plot,
+                                   meas_res=all_meas_results,
+                                   skip_branches=['x3', 'x4'],
+                                   base_config=base_config_dict,
+                                   k_perturb=SimConfig.default_Kperturb,
+                                   save_figs=True)
+elif SIM_TYPE == 'multiparam':
+    raise Exception("multiparam sim not implemented")
+else:
+    raise Exception("Wrong SIM_TYPE, choose one from 'sweep', 'perturbation' or 'multiparam'")
 
-generate_sweep_plots(params_to_plot=params_to_plot, 
-                     all_meas_results=all_meas_results, 
-                     skippable_branches=skippable_branches,
-                     save_figs=True)
+
 
