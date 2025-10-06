@@ -60,7 +60,7 @@ class GaNDevice:
         
     def Vsd(self, I_sd):  # Linear interpolation from 2 datasheet points
         if self.model == 'EPC2305':
-            return 1.862738 + (137.68 - 0.562 * (self.T_j - 25)) * max(0, I_sd)  # V
+            return 1.862738 + (0.007263 - 5.01e-5 * (self.T_j - 25)) * max(0, I_sd)  # V
         else:
             raise ValueError("Unknown GaN model")
         
@@ -92,8 +92,9 @@ class GaNDevice:
         else:
             raise ValueError("Unknown GaN model")
 
-    def calculate_switching_losses(self, I_rms, Isw_on, Isw_off, V_sw, f_sw, t_deadtime, analysis_type='simple'):
-        
+    def calculate_switching_losses(self, Isw_on, Isw_off, V_sw, f_sw, t_deadtime, analysis_type='simple'):
+        """Calculates the total switching losses of the GaN device.
+        I_rms: RMS current through the device (A)"""
         # Turn-on energy losses per switching event (J)
         I_G_cr = (self.V_drive-(self.Vgs_th + self.V_plateau())/2) / self.R_gate_total_on  # I_G during plateau
         t_cr = self.Qgs2(Id=Isw_on) / I_G_cr
@@ -118,41 +119,52 @@ class GaNDevice:
 
         # Gate drive loss:
         E_gate = self.Qgate * self.V_drive  # Energy lost in driving the gate (J)
-        Pgate = E_gate * f_sw  # Gate drive power loss (W)
+        Pgate = E_gate * f_sw * 1/3  # Gate drive power loss (W), assuming 1/3 power dissipated in GaN device (Rdrv=Rg_on=Rgate)
 
         # Reverse conduction loss:
         t_on_SR = self.Qgs2(Id=Isw_on) * self.R_gate_total_on / (self.V_drive - (self.Vgs_th-0)/2)  # Time in reverse conduction during turn-on
         t_off_SR = 2 * self.Qgs2(Id=Isw_off) * self.R_gate_total_off / (self.Vgs_th - 0)  # Time in reverse conduction during turn-off
         t_sd_off = max(0, t_deadtime - t_vf - t_cr/2 - t_off_SR/2)
         t_sd_on = max(0, t_deadtime - t_cf - t_vr/2 - t_on_SR/2)
-        print(f"t_deadtime: {1e12*t_deadtime:.3f} ns")
-        print(f"t_cf: {1e12*t_cf:.3f} ns")
-        print(f"t_vr: {1e12*t_vr:.3f} ns")
-        print(f"t_on_SR: {1e12*t_on_SR:.3f} ns")
-        print(f"t_deadtime - t_cf - t_vr/2 - t_on_SR/2: {1e12*(t_deadtime - t_cf - t_vr/2 - t_on_SR/2):.3f} ns")
+        # print(f"t_deadtime: {1e12*t_deadtime:.3f} ns")
+        # print(f"t_cf: {1e12*t_cf:.3f} ns")
+        # print(f"t_vr: {1e12*t_vr:.3f} ns")
+        # print(f"t_on_SR: {1e12*t_on_SR:.3f} ns")
+        # print(f"t_deadtime - t_cf - t_vr/2 - t_on_SR/2: {1e12*(t_deadtime - t_cf - t_vr/2 - t_on_SR/2):.3f} ns")
         E_sd = Isw_on * self.Vsd(Isw_on) * t_sd_on + Isw_off * self.Vsd(Isw_off) * t_sd_off
+
+        # Simple implementation of E_sd, due to previous equations returning negative times sometimes
+        E_sd = (Isw_on * self.Vsd(Isw_on) + Isw_off * self.Vsd(Isw_off)) * (t_deadtime * 0.75)
         P_sd = E_sd * f_sw  # Reverse conduction power loss (W)
 
         # Coss related loss:
         E_coss = self.Qoss_energy_eq(V_sw)  # Energy lost in output capacitance (J)
         P_coss = E_coss * f_sw  # Coss related power loss (W)
 
+        P_sw_tot = max(0, P_on) + max(0, P_off) + max(0, Pgate) + max(0, P_sd) + max(0, P_coss)  # Total power loss (W)
+        return P_sw_tot, P_on, P_off, Pgate, P_sd, P_coss
+    
+    def calculate_conduction_losses(self, I_rms):
+        """Calculates the conduction losses of the GaN device.
+        I_rms: RMS current through the device (A)"""
         # Conduction related loss:
         P_cond = I_rms**2 * self.Rds_on()  # Conduction loss (W)
+        return P_cond
 
-        P_tot = max(0, P_on) + max(0, P_off) + max(0, Pgate) + max(0, P_sd) + max(0, P_cond) + max(0, P_coss)  # Total power loss (W)
-        return P_tot, P_on, P_off, Pgate, P_sd, P_cond, P_coss
 
-# Example usage:
+if __name__ == "__main__":
+    # Example usage:
 
-Isw_on = 10.0        # Switching current (A)
-Isw_off = 10.0        # Switching current (A)
-V_sw = 100       # Switching voltage (V)
-f_sw = 100e3       # Switching frequency (Hz)
-t_deadtime = 5e-9  # Dead time (s)
-I_rms = 80.0       # RMS current (A)
-TheDevice = GaNDevice(model='EPC2305', T_j=80)
+    Isw_on = 10.0        # Switching current (A)
+    Isw_off = 10.0        # Switching current (A)
+    V_sw = 100       # Switching voltage (V)
+    f_sw = 100e3       # Switching frequency (Hz)
+    t_deadtime = 5e-9  # Dead time (s)
+    I_rms = 80.0/6       # RMS current (A)
 
-P_tot, P_on, P_off, Pgate, P_sd, P_cond, P_coss = TheDevice.calculate_switching_losses(I_rms, Isw_on, Isw_off, V_sw, f_sw, t_deadtime)
-print(f"Total loss: {P_tot*1e3:.3f} mW, Turn-on loss: {P_on*1e3:.3f} mW, Turn-off loss: {P_off*1e3:.3f} mW, Gate loss: {Pgate*1e3:.3f} mW, Reverse conduction loss: {P_sd*1e3:.3f} mW, Conduction loss: {P_cond*1e3:.3f} mW, Coss loss: {P_coss*1e3:.3f} mW")
+    TheDevice = GaNDevice(model='EPC2305', T_j=80)
+    P_tot, P_on, P_off, Pgate, P_sd, P_coss = TheDevice.calculate_switching_losses(Isw_on, Isw_off, V_sw, f_sw, t_deadtime)
+    P_cond = TheDevice.calculate_conduction_losses(I_rms)
+    P_tot += P_cond
+    print(f"Total loss: {P_tot*1e3:.3f} mW, Turn-on loss: {P_on*1e3:.3f} mW, Turn-off loss: {P_off*1e3:.3f} mW, Gate loss: {Pgate*1e3:.3f} mW, Reverse conduction loss: {P_sd*1e3:.3f} mW, Conduction loss: {P_cond*1e3:.3f} mW, Coss loss: {P_coss*1e3:.3f} mW")
 
