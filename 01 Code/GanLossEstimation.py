@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib.pyplot as plt
 
 class GaNDevice:
     def __init__(self, model='EPC2305', T_j=25):
@@ -153,18 +154,68 @@ class GaNDevice:
 
 
 if __name__ == "__main__":
-    # Example usage:
-
-    Isw_on = 10.0        # Switching current (A)
-    Isw_off = 10.0        # Switching current (A)
-    V_sw = 100       # Switching voltage (V)
-    f_sw = 100e3       # Switching frequency (Hz)
-    t_deadtime = 5e-9  # Dead time (s)
-    I_rms = 80.0/6       # RMS current (A)
 
     TheDevice = GaNDevice(model='EPC2305', T_j=80)
-    P_tot, P_on, P_off, Pgate, P_sd, P_coss = TheDevice.calculate_switching_losses(Isw_on, Isw_off, V_sw, f_sw, t_deadtime)
-    P_cond = TheDevice.calculate_conduction_losses(I_rms)
+    P_tot, P_on, P_off, Pgate, P_sd, P_coss = TheDevice.calculate_switching_losses(Isw_on=10,
+                                                                                   Isw_off=10,
+                                                                                   V_sw=100,
+                                                                                   f_sw=100e3,
+                                                                                   t_deadtime=5e-9)
+    P_cond = TheDevice.calculate_conduction_losses(I_rms=80.0/6)
     P_tot += P_cond
     print(f"Total loss: {P_tot*1e3:.3f} mW, Turn-on loss: {P_on*1e3:.3f} mW, Turn-off loss: {P_off*1e3:.3f} mW, Gate loss: {Pgate*1e3:.3f} mW, Reverse conduction loss: {P_sd*1e3:.3f} mW, Conduction loss: {P_cond*1e3:.3f} mW, Coss loss: {P_coss*1e3:.3f} mW")
+    
+    # Plotting test
+    gan = GaNDevice()
 
+    # Define current range (e.g., 0 to 60A)
+    currents = np.linspace(0, 60, 100)
+
+    # Prepare lists for each loss component
+    switch_on_losses = []
+    switch_off_losses = []
+    coss_losses = []
+    isd_losses = []
+    Pgate_losses = []
+    conduction_losses = []
+
+    for Isw in currents:
+        # Calculate switching losses (returns tuple: (switch_on, switch_off, coss, driver, ...))
+        _, P_on, P_off, Pgate, P_sd, P_coss = gan.calculate_switching_losses(Isw, Isw, 100, 100e3, 5e-9, analysis_type='simple')
+        switch_on_losses.append(P_on)
+        switch_off_losses.append(P_off)
+        coss_losses.append(P_coss)
+        isd_losses.append(P_sd)
+        Pgate_losses.append(Pgate)
+        # Calculate conduction losses (returns a single value)
+        conduction = gan.calculate_conduction_losses(Isw)
+        conduction_losses.append(conduction)
+
+    # Stack the losses for area plotting
+    loss_arrays = np.array([
+        switch_on_losses,
+        switch_off_losses,
+        coss_losses,
+        Pgate_losses,
+        conduction_losses
+    ])
+
+    labels = [
+        'Switch On Loss',
+        'Switch Off Loss',
+        'Coss Loss',
+        'Driver Loss',
+        'Conduction Loss'
+    ]
+
+    colors = ["#1b7cc2", '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+
+    plt.figure(figsize=(10, 6))
+    plt.stackplot(currents, loss_arrays, labels=labels, colors=colors, alpha=0.8)
+    plt.xlabel('Switching Current (A)')
+    plt.ylabel('Loss (W)')
+    plt.title('GaN Device Losses vs Switching Current (Stacked)')
+    plt.legend(loc='upper left')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
