@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 class GaNDevice:
     def __init__(self, model='EPC2305', T_j=25):
@@ -154,6 +153,7 @@ class GaNDevice:
 
 
 if __name__ == "__main__":
+    import matplotlib.pyplot as plt
 
     TheDevice = GaNDevice(model='EPC2305', T_j=80)
     P_tot, P_on, P_off, Pgate, P_sd, P_coss = TheDevice.calculate_switching_losses(Isw_on=10,
