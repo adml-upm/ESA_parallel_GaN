@@ -23,15 +23,28 @@ class LtSimConfiguration:
         else:
             raise ValueError(f"Parameter {param_name} not in base configuration dictionary.")
         
-    def add_param_perturbation(self, param_name: str, perturb_magnitude: float | None = None):
+    def add_param_perturbation(self, param_name: str, 
+                               perturb_abs: float | None = None, 
+                               perturb_rel: float | None = None):
         if param_name in self.base_cnfg_dict:
-            if perturb_magnitude is None:
-                perturb_magnitude = self.default_Kperturb * abs(base_editor.scan_eng(self.base_cnfg_dict[param_name]))
+            if perturb_abs is not None and perturb_rel is not None:
+                raise ValueError("Use either magnitude or percentage, not both")
+            elif perturb_abs is None and perturb_rel is not None:
+                perturb_abs = perturb_rel * abs(self.base_cnfg_dict[param_name])
+            elif perturb_abs is not None and perturb_rel is None:
+                pass
+            else:
+                perturb_abs = self.default_Kperturb * abs(self.base_cnfg_dict[param_name])
                 
-            self.perturb_params[param_name] = perturb_magnitude
+            self.perturb_params[param_name] = perturb_abs
             self.params_to_plot.append(param_name)
         else:
             raise ValueError(f"Parameter {param_name} not in base configuration dictionary.")
+        
+    def perturb_all_params(self):
+        """Adds all base_cnfg_dict keys to params to be perturbed. Defaulte default_Kperturb is used as mag. """
+        for param in self.base_cnfg_dict.keys():
+            self.add_param_perturbation(param_name=param)
 
     def yield_cnfgs_sequentially(self, iter_type: str='sweep'):
         """Yields configurations one at a time based on the specified iteration type.
@@ -70,8 +83,8 @@ class LtSimConfiguration:
         for param_name, perturb_magnitude in self.perturb_params.items():
             if param_name in self.base_cnfg_dict.keys():
                 config = self.base_cnfg_dict.copy()
-                new_val = base_editor.to_float(config[param_name]) + perturb_magnitude
-                config[param_name] = base_editor.format_eng(new_val)
+                new_val = config[param_name] + perturb_magnitude
+                config[param_name] = new_val
                 yield config, {param_name: config[param_name]}
 
     def multiparam_sweep_generator(self):
