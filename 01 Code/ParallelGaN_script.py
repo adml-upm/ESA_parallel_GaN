@@ -11,7 +11,8 @@ def update_netlist_params(new_cnfg: dict, netlist):
     # Update all params & sim command
     netlist.add_instruction(f".tran {2*max([new_cnfg[f"T_sw_{i}"] for i in range(1, N_devices + 1)])*1e6:.3}u")
     for k in sorted(new_cnfg.keys()):
-        netlist.set_parameter(k, new_cnfg[k]) 
+        netlist.set_parameter(k, new_cnfg[k])
+
     # Update gate driving voltage sources
     for i in range(1, N_devices + 1):
         new_cnfg[f"T_on_{i}"] = new_cnfg[f"D_on_{i}"] * new_cnfg[f"T_sw_{i}"]
@@ -29,13 +30,19 @@ def update_netlist_params(new_cnfg: dict, netlist):
                                                                                         tsw=new_cnfg[f"T_sw_{i}"] * 1e6)
         netlist.set_component_value(f'Vgdrv{i}', driver_cmd)
 
+def update_device_models(new_cnfg: dict):
+    # Update HEMT definition:
+    for i in range(1, N_devices + 1):  # only for first subckt
+        netlist.set_parameter(f'dev_{i}', 0)  # Reset to default first
+    netlist.set_parameter('dev_1', 1)  # Set to changed
+
 def introduce_meas_commands(new_cnfg: dict, netlist):
     # Remove existing .meas commands
     netlist.remove_Xinstruction(search_pattern='.meas')
     for i in range(1, N_devices + 1):
         T_sw   = new_cnfg[f"T_sw_{i}"]
         T_on_i = new_cnfg[f"T_on_{i}"]
-        tdrv_r = new_cnfg[f"tdrv_rise_{i}"]
+        tdrv_r = new_cnfg[f"tdrv_rise_{i}"] 
         T_off  = new_cnfg[f"T_off_{i}"]
 
         # Current balance measurements
@@ -65,38 +72,39 @@ simulator = r"C:\Users\Alex\AppData\Local\Programs\ADI\LTspice\LTspice.exe"
 # select spice model
 LTC = SimRunner(output_folder='temp', simulator=None, parallel_sims=16, timeout=30)
 
-sim_path = './02 Simulations/02 ParallelGaN/ParGan_subckt_example.asc'
+# sim_path = './02 Simulations/02 ParallelGaN/ParGan_subckt_example.asc'
+sim_path = './02 Simulations/02 ParallelGaN/ParGan_V3.asc'
 netlist = AscEditor(sim_path)
 
 
+TOTAL_DRAWN_DEVICES = 10
+
+N_devices = 10
+if N_devices > TOTAL_DRAWN_DEVICES:
+    raise ValueError("N_devices exceeds the number of devices drawn in the netlist")
 # Electrical testing setpoint:
-N_devices = 4
-m_points = 5
+m_sweep_points = 5
 V_DC = 100  # V
 I_DC = 10   # A
-# netlist.set_component_value('V_DC', f'{V_DC}')
-# netlist.set_component_value('I_DC', f'{I_DC}')
 f_sw = 100e3
 T_sw = 1 / f_sw
 D_sw = 0.5
 T_on = D_sw * T_sw
 
 # ---------------------------------------------------------------
-# Gate Driver setup: 
-# Vdrv_off = 0
-# Vdrv_on = 5
-# Vdrive_delay = 0
-# tdrv_rise = 1e-9
-# tdrv_fall = 1e-9
 
-# T_off = T_sw - T_on - tdrv_rise - tdrv_fall
-# T_off_corr = T_sw - T_on_corr
+# Get hemt param baseconfig and add to base_config_dict
+SimConfig = LtSimConfiguration()
+hemt_base_config = SimConfig.get_hemt_parameters_from_lib()
 
 base_config_dict = {
     'V_DC': V_DC,
     'I_DC': I_DC
 }
-for i in range(1, N_devices + 1): 
+
+for i in range(1, N_devices + 1):
+    # HEMT device param
+    base_config_dict[f'dev_{i}'] = 0  # 0: default model, 1: modified model
     # HEMT cell params
     base_config_dict[f"R_drain_{i}"] = 1e-3
     base_config_dict[f"L_drain_{i}"] = 1e-9
@@ -118,66 +126,90 @@ for i in range(1, N_devices + 1):
     base_config_dict[f"T_sw_{i}"] = 1 / 100e3
     base_config_dict[f"D_on_{i}"] = 0.5
 
+    # HEMT model params
+    base_config_dict.update({k + f'_{i}': v for k, v in hemt_base_config.items()})
+    SimConfig.base_cnfg_dict = base_config_dict
 
-SIM_TYPE = 'sweep'  # 'sweep', 'perturbation', 'multiparam'
+# Define simulation type and parameter variations
+SIM_TYPE = 'perturbation'  # 'sweep', 'perturbation', 'multiparam'
 if SIM_TYPE == 'sweep':
-    SimConfig = LtSimConfiguration(base_config=base_config_dict)
-    SimConfig.add_param_sweep_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_points)
-    SimConfig.add_param_sweep_with_range('L_drain_1', [500e-12, 50e-9], m_points=m_points, log_space=True)
-elif SIM_TYPE == 'perturbation':
-    SimConfig = LtSimConfiguration(base_config=base_config_dict)
+    SimConfig.add_param_sweep_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_sweep_points)
+    SimConfig.add_param_sweep_with_range('L_drain_1', [500e-12, 50e-9], m_points=m_sweep_points, log_space=True)
+    # SimConfig.add_param_sweep_with_range('Vdrv_on_1', [4.5, 5.5], m_points=m_points)
+elif SIM_TYPE == 'perturbation':    
     SimConfig.default_Kperturb = 0.1  # Modify standard relative perturbation amount (p.u.)
-    # SimConfig.add_param_perturbation('L_drain_1', 10e-9)
-    # SimConfig.add_param_perturbation('R_drain_1', 1e-3)
-    SimConfig.add_param_perturbation("R_drain_1")
-    SimConfig.add_param_perturbation("L_drain_1")
-    SimConfig.add_param_perturbation("R_source_1")
-    SimConfig.add_param_perturbation("L_source_1")
-    SimConfig.add_param_perturbation("R_pcb_branch_1")
-    SimConfig.add_param_perturbation("Lg_uncommon_1")
-    SimConfig.add_param_perturbation("L_common_source_1")
-    SimConfig.add_param_perturbation("Vdrv_off_1")
-    SimConfig.add_param_perturbation("Vdrv_on_1", perturb_rel=0.1)
-    SimConfig.add_param_perturbation("Vdrive_delay_1")
-    SimConfig.add_param_perturbation("tdrv_rise_1")
-    SimConfig.add_param_perturbation("tdrv_fall_1")
-    SimConfig.add_param_perturbation("T_sw_1", perturb_rel=0.1)
-    SimConfig.add_param_perturbation("D_on_1")
+
+    # Circuit parameter perturbations
+    # SimConfig.add_param_perturbation("R_drain_1")
+    # SimConfig.add_param_perturbation("L_drain_1")
+    # SimConfig.add_param_perturbation("R_source_1")
+    # SimConfig.add_param_perturbation("L_source_1")
+    # SimConfig.add_param_perturbation("R_pcb_branch_1")
+    # SimConfig.add_param_perturbation("Lg_uncommon_1")
+    # SimConfig.add_param_perturbation("L_common_source_1")
+    # SimConfig.add_param_perturbation("Vdrv_off_1")
+    # SimConfig.add_param_perturbation("Vdrv_on_1", perturb_rel=0.1)
+    # SimConfig.add_param_perturbation("Vdrive_delay_1")
+    # SimConfig.add_param_perturbation("tdrv_rise_1")
+    # SimConfig.add_param_perturbation("tdrv_fall_1")
+    # SimConfig.add_param_perturbation("T_sw_1", perturb_rel=0.1)
+
+    # HEMT model perturbations
+    SimConfig.add_param_perturbation('Vgs_th_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('k_gm_factor_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Vgs_th_k_corner_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Rds_on_base_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('gm_Tc_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Rds_on_Tc_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Vgs_th_Tc_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Rgate_int_1', perturb_abs=0.05)
+    # SimConfig.add_param_perturbation("D_on_1")
     # SimConfig.add_param_perturbation("R_driver_1")
     # SimConfig.add_param_perturbation("R_g_1")
     # SimConfig.add_param_perturbation('L_drain_1', 1e-3)
 elif SIM_TYPE == 'multiparam':
-    pass
+    raise ValueError("multiparam sim not implemented")
 else:
     raise ValueError("Invalid SIM_TYPE. Choose from 'sweep', 'perturbation', or 'multiparam'.")
 
 # ---------------------------------------------------------------
-# .meas setup:
 
-
-# ---------------------------------------------------------------
 
 # netlist.add_instructions(
 #     f".include {os.path.abspath('./02 Simulations/00 ComonLibs/EPCGaNLibrary.lib')}",
 #     f".include {os.path.abspath('./02 Simulations/00 ComonLibs/EPCGaN.asy')}"
 # )
 
+
+
+# Adjust number of devices in the netlist
+for i in range(N_devices + 1, TOTAL_DRAWN_DEVICES + 1):
+    netlist.remove_component(f'X{i}')
+    netlist.remove_component(f'XG{i}')
+    netlist.remove_component(f'Vgdrv{i}')
+    netlist.remove_component(f'R{i}')
+    netlist.remove_component(f'R_{i-1}{i}')
+
 start_time = time.time()
 all_meas_results = {}
-
 for config, changed_params in SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE):
-    # Update netlist and run sim    
+    # Update netlist or device library, add .meas commands and run sim    
     update_netlist_params(config, netlist)
+    update_device_models(config)
+    SimConfig.generate_modif_lib(hemt_param_changes=changed_params)
     introduce_meas_commands(config, netlist)
     sim = LTC.run(netlist)
+    # netlist.reset_netlist()  # Remove existing HEMT subckt instance
     # Store the changed parameters for this sim
     log_name = sim.netlist_file.name.rstrip('.asc')
     all_meas_results[log_name] = {}
     all_meas_results[log_name]['config_changes']= changed_params
+    time.sleep(0.5)  # slight delay to avoid overloading LTSpice
 
 # Wait for all the sims launched. A timeout counter from last completed sim keeps track of stalled sims
 LTC.wait_completion()
 print('Successful/Total Simulations: ' + str(LTC.okSim) + '/' + str(LTC.runno))
+
 
 for raw, log in LTC:
     # print("Raw file: %s, Log file: %s" % (raw, log))
@@ -223,6 +255,3 @@ elif SIM_TYPE == 'multiparam':
     raise Exception("multiparam sim not implemented")
 else:
     raise Exception("Wrong SIM_TYPE, choose one from 'sweep', 'perturbation' or 'multiparam'")
-
-
-

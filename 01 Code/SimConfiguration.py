@@ -3,6 +3,7 @@ from itertools import product
 from spicelib.editor import base_editor
 import re
 from pathlib import Path
+import shutil
 
 class LtSimConfiguration:
     def __init__(self, base_config: dict = None):
@@ -16,9 +17,9 @@ class LtSimConfiguration:
         self.default_Kperturb = 0.05  # standard 5% perturbation magnitude
 
         # HEMT library params
-        self.hemt_lib_path = r"C:\Users\Alex\Documents\03 Projects\04 ESA parallel GaN\ESA_parallel_GaN\02 Simulations\00 ComonLibs\EPCGaNLibrary.lib"
-        p = Path(self.hemt_lib_path)
-        self.modif_hemt_lib_path = str(p.with_name(f"{p.stem}_modified{p.suffix}"))
+        # project root is parent of "01 Code" -> Path(__file__).resolve().parent.parent
+        p = Path(__file__).resolve().parent.parent / "02 Simulations" / "00 ComonLibs" / "EPCGaNLibrary.lib"
+        self.hemt_lib_path = str(p)
         # self.out_file_path = r"C:\Users\Alex\Documents\03 Projects\04 ESA parallel GaN\ESA_parallel_GaN\02 Simulations\00 ComonLibs\EPCGaNLibrary_modified.lib"
         self.epc_model_param_mapping = {
             # 'si': 'si',
@@ -28,18 +29,28 @@ class LtSimConfiguration:
             # 'Wg': 'Wg',
             'k_gm_factor': 'A1',  # ∝ transconductance gm scaling factor
             'Vgs_th': 'k2',  # Gate threshold voltage
-            'Vgs_th_smoothing_factor': 'k3',  # Turn-on softness
+            'Vgs_th_k_corner': 'k3',  # Turn-on softness
             'Rds_on_base': 'rpara',  # Base Parasitic resistance
             # 'rpara_s_factor': 'rpara_s_factor', # Distributes Rdson to source and drain parasitics. Don't touch
-            'aITc': 'aITc',  # Temperature coeff for gm, reduces Id per °C increase. (care for polarity)
-            'arTc': 'arTc',  # Temperature coeff for Rds_on. (care for polarity)
-            'Vgs_th_temp_coef': 'k2Tc',  # Temp coeff for Vth
+            'gm_Tc': 'aITc',  # Temperature coeff for gm, reduces Id per °C increase. (care for polarity)
+            'Rds_on_Tc': 'arTc',  # Temperature coeff for Rds_on. (care for polarity)
+            'Vgs_th_Tc': 'k2Tc',  # Temp coeff for Vth
             # 'Channel_modulation_0': 'x0_0',
             # 'channel_modulation_0_temp_coef': 'x0_0_TC',
             # 'Channel_modulation_1': 'x0_1',
             # 'channel_modulation_1_temp_coef': 'x0_1_TC',
-            'Rgate_hemt': 'rg_value',
+            'Rgate_int': 'rg_value',
         }
+        self.inverse_epc_model_param_mapping = {v: k for k, v in self.epc_model_param_mapping.items()}
+
+    def _is_epc_param(self, param_name: str, type: str='standard') -> bool:
+        base_name = re.sub(r'_[0-9]+$', '', param_name)
+        if type == 'standard':
+            return base_name in self.epc_model_param_mapping.keys()
+        elif type == 'spice':
+            return base_name in self.epc_model_param_mapping.values()
+        else:
+            raise ValueError("type must be 'standard' or 'spice'")
 
     def add_param_sweep_with_range(self, param_name: str, range_vals: list, m_points: int=5, log_space:bool =False):
         if param_name in self.base_cnfg_dict:
@@ -54,6 +65,9 @@ class LtSimConfiguration:
     def add_param_perturbation(self, param_name: str, 
                                perturb_abs: float | None = None, 
                                perturb_rel: float | None = None):
+        if self._is_epc_param(param_name, type='standard'):
+            stripped_param_name = param_name.rsplit('_', 1)
+            param_name = '_'.join([self.epc_model_param_mapping[stripped_param_name[0]], stripped_param_name[-1]])
         if param_name in self.base_cnfg_dict:
             if perturb_abs is not None and perturb_rel is not None:
                 raise ValueError("Use either magnitude or percentage, not both")
@@ -62,12 +76,12 @@ class LtSimConfiguration:
             elif perturb_abs is not None and perturb_rel is None:
                 pass
             else:
-                perturb_abs = self.default_Kperturb * abs(self.base_cnfg_dict[param_name])
-                
-            self.perturb_params[param_name] = perturb_abs
-            self.params_to_plot.append(param_name)
+                perturb_abs = self.default_Kperturb * abs(self.base_cnfg_dict[param_name])            
         else:
             raise ValueError(f"Parameter {param_name} not in base configuration dictionary.")
+        
+        self.perturb_params[param_name] = perturb_abs
+        self.params_to_plot.append(param_name)
         
     def perturb_all_params(self):
         """Adds all base_cnfg_dict keys to params to be perturbed. Defaulte default_Kperturb is used as mag. """
@@ -131,9 +145,8 @@ class LtSimConfiguration:
         raise ValueError("Not yet implemented")
         self.base_cnfg_dict['N_devices'] = N_devices
 
-    def modify_hemt_parameters(self, hemt_name: str='EPC2305', hemt_param_changes: dict=None):
-        """Modifies HEMT parameters in the base configuration.
-        hemt_params: Dictionary of HEMT parameters to modify."""
+    def get_hemt_parameters_from_lib(self, hemt_name: str='EPC2305'):
+        """Retrieves HEMT parameters from the library file."""
 
         with open(self.hemt_lib_path, "r", encoding="utf-8") as f:
             file_text = f.read()
@@ -144,13 +157,13 @@ class LtSimConfiguration:
             re.DOTALL | re.MULTILINE | re.IGNORECASE)
 
         match = device_block_re.search(file_text)
-        device_definition_block = match.group(0)
+        self.orig_device_definition_block = match.group(0)
         if match.group(1) != hemt_name:
             raise ValueError(f"HEMT device {hemt_name} not found in the library file.")
 
         # collect logical .param lines (handle continuation lines starting with '+')
         param_line_matches = []
-        lines = device_definition_block.splitlines()
+        lines = self.orig_device_definition_block.splitlines()
         param_line_matches = []
         current = None
         param_re = re.compile(r'^\s*\.param\b(.*)$', re.IGNORECASE)
@@ -182,32 +195,37 @@ class LtSimConfiguration:
                 if '=' in part:
                     k, v = part.split('=', 1)
                     epc_model_params[k.strip()] = v.strip()
+
+        # return only parameters whose spice-names appear in the mapping values as floats
+        NUM_RE = re.compile(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?')
+        filtered_config = {k: v for k, v in epc_model_params.items() if k in set(self.epc_model_param_mapping.values())}
+        for k, v in filtered_config.items():
+            try:
+                num_val = float(v)
+            except ValueError:
+                m = NUM_RE.search(v[1:-1].strip() if v.startswith('{') and v.endswith('}') else v)
+                num_val = float(m.group(0))
+            filtered_config[k] = num_val
+
+        return filtered_config
     
-        # start/end positions of the matched device block in the original file text
-        modified_device_definition_block = device_definition_block  # we'll modify this copy
+    def generate_modif_lib(self, hemt_param_changes: dict=None):
         # rename the device in the matched .subckt line by appending "_modified"
-        new_name = f"{hemt_name}_modified"
-        subckt_name_re = re.compile(r'(^\s*\.subckt\s+)'+re.escape(hemt_name)+r'(\b)', re.IGNORECASE | re.MULTILINE)
-        modified_device_definition_block = subckt_name_re.sub(r'\1' + new_name + r'\2', modified_device_definition_block, count=1)
+        subckt_name_re = re.compile(r'(^\s*\.subckt\s+)(\S+)', re.IGNORECASE | re.MULTILINE)
+        def _rename_subckt(m):
+            prefix, name = m.group(1), m.group(2)
+            return prefix + name + '_modified'
+        modif_dev_def_block = subckt_name_re.sub(_rename_subckt, self.orig_device_definition_block, count=1)
 
-        # also replace the original block in the full file text so the file can be written as a full modified library if needed
-        file_text = file_text[:match.start()] + modified_device_definition_block + file_text[match.end():]
         # apply each requested change: map friendly key -> model param name, then replace its value in the block
-        for common_key in hemt_param_changes.keys() & self.epc_model_param_mapping.keys():
-            param_spice_name = self.epc_model_param_mapping[common_key]
-            new_value = hemt_param_changes[common_key]
-            # update parsed params dictionary (if present) for bookkeeping
-            if common_key in epc_model_params.keys():
-                epc_model_params[common_key] = new_value
-
-            # prepare replacement string for new_value
-            if isinstance(new_value, (int, float)):
-                new_val_str = repr(new_value)
-            else:
-                new_val_str = str(new_value)
+        for param_spice_name in hemt_param_changes.keys():
+            if not self._is_epc_param(param_spice_name, type='spice'):
+                continue
+            # param_spice_name = self.epc_model_param_mapping[key]
+            new_val_str = repr(hemt_param_changes[param_spice_name])  # Assume numeric types only for now (repr->str)
 
             # find assignments like "param=VALUE" where VALUE is either a braced expression {...} or a single token
-            pat = re.compile(r'(?<!\w)(' + re.escape(param_spice_name) + r')\s*=\s*(\{.*?\}|[^\s]+)', re.DOTALL | re.IGNORECASE)
+            pat = re.compile(r'(?<!\w)(' + re.escape(param_spice_name.rsplit('_', 1)[0]) + r')\s*=\s*(\{.*?\}|[^\s]+)', re.DOTALL | re.IGNORECASE)
 
             def _replace_assign(m):
                 lhs = m.group(1)
@@ -229,12 +247,35 @@ class LtSimConfiguration:
                     # non-braced RHS: replace whole token
                     return f"{lhs}={new_val_str}"
 
-            modified_device_definition_block = pat.sub(_replace_assign, modified_device_definition_block)
+            modif_dev_def_block = pat.sub(_replace_assign, modif_dev_def_block)
 
-        # write the modified full file text to a static output file (overwrites existing)
-        with open(self.modif_hemt_lib_path, "w", encoding="utf-8") as out_f:
-            out_f.write(modified_device_definition_block)
+        lib_path = Path(self.hemt_lib_path)
+
+        # read original file, replace the matched device block with the modified block
+        with open(lib_path, 'r', encoding='utf-8') as f:
+            orig_text = f.read()
+
+        marker_re = re.compile(r'(?m)^.*\*\*\*MODIFIED MODELS FOLLOW THIS COMMENT\*\*\*.*$')
+        m_marker = marker_re.search(orig_text)
+        if m_marker:
+            cut_pos = m_marker.end()
+            out_text = orig_text[:cut_pos] + '\n' + modif_dev_def_block
+        else:
+            raise ValueError("Marker for modified models not found in library file. Please add a line with '***MODIFIED MODELS FOLLOW THIS COMMENT***' after all original models")
+
+        # write the modified content back using standard open/write
+        with open(lib_path, 'w', encoding='utf-8') as f:
+            f.write(out_text)
 
 
 
 
+# Useful for starting values of sim V3:
+
+# doo = [lambda i: f"R_drain_{i}", lambda i: f"L_drain_{i}", lambda i: f"R_source_{i}", lambda i: f"L_source_{i}", 
+#        lambda i: f"R_pcb_branch_{i}", lambda i: f"Lg_uncommon_{i}", lambda i: f"L_common_source_{i}", 
+#        lambda i: f"R_driver_{i}", lambda i: f"R_g_{i}", lambda i: f"dev_{i}"]
+# vals = ["1u", "1p", "1u", "1p", "1u", "1p", "1p", "1u", "1u", "0"]
+# for func, val in zip(doo, vals):
+#     for i in range(1, 11):
+#         print(".param ", func(i)," = ", val)

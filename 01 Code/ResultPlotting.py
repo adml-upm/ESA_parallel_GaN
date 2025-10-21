@@ -1,10 +1,13 @@
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+plt.ioff()  # Turn off interactive mode
 import numpy as np
 import os
 from spicelib.editor.base_editor import format_eng, scan_eng
 import pandas as pd
 import seaborn as sns
-
+from SimConfiguration import LtSimConfiguration
 
 def detect_spacing(values, tol=1e-12):
     arr = np.array(values, dtype=float)
@@ -191,9 +194,14 @@ def generate_perturbation_heat_map(params_to_plot, meas_res, skip_branches=None,
                 except ZeroDivisionError:
                     continue
                 variational_dict[param_to_plot][meas_key] = percent_var
-                
+    
+    epc_map = LtSimConfiguration().inverse_epc_model_param_mapping
+    # Rename rows and columns for better readability
+    renamed_variational_dict = {'_'.join([epc_map[k.rsplit('_', 1)[0]],k.rsplit('_', 1)[-1]]): v for k, v in variational_dict.items()}
+    
+
     # Build DataFrame at the end
-    variation_df = pd.DataFrame.from_dict(variational_dict, orient="index")
+    variation_df = pd.DataFrame.from_dict(renamed_variational_dict, orient="index")
     print(variation_df.head)
 
     # Plot seaborn heatmap
@@ -212,13 +220,10 @@ def generate_perturbation_heat_map(params_to_plot, meas_res, skip_branches=None,
     if not save_figs:
         plt.show()
     else:
-        output_folder = './plots'
-        os.makedirs(output_folder, exist_ok=True)
-        plot_path = os.path.join(
-            output_folder,
-            f'perturbation_heat_map.png'
-        )
-        plt.savefig(plot_path)
+        output_folder = os.path.dirname(os.path.dirname(__file__))
+        # os.makedirs(output_folder, exist_ok=True)
+
+        plt.savefig(os.path.join(output_folder, 'plots', f'perturbation_heat_map.png'))
         plt.close()
 
 
