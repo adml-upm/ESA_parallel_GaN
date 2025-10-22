@@ -117,6 +117,10 @@ class LtSimConfiguration:
             for param_value in param_range:
                 config = self.base_cnfg_dict.copy()
                 config[param_name] = param_value
+                # Adjust device to modified lib entry if EPC parameter is hemt parameter
+                if self._is_epc_param(param_name, type='spice'):
+                    subindex = param_name.rsplit('_', 1)[-1]
+                    config[f'dev_{subindex}'] += '_' + subindex
                 yield config, {param_name: param_value}
 
     def single_param_perturbation_generator(self):
@@ -127,6 +131,10 @@ class LtSimConfiguration:
                 config = self.base_cnfg_dict.copy()
                 new_val = config[param_name] + perturb_magnitude
                 config[param_name] = new_val
+                # Adjust device to modified lib entry if EPC parameter is hemt parameter
+                if self._is_epc_param(param_name, type='spice'):
+                    subindex = param_name.rsplit('_', 1)[-1]
+                    config[f'dev_{subindex}'] += '_' + subindex
                 yield config, {param_name: config[param_name]}
 
     def multiparam_sweep_generator(self):
@@ -145,125 +153,144 @@ class LtSimConfiguration:
         raise ValueError("Not yet implemented")
         self.base_cnfg_dict['N_devices'] = N_devices
 
-    def get_hemt_parameters_from_lib(self, hemt_name: str='EPC2305'):
-        """Retrieves HEMT parameters from the library file."""
+    def get_hemt_parameters_from_lib(self, hemt_name: str|list='EPC2305'):
+        """Retrieves HEMT parameters from the library file.
+        hemt_name: Name of the HEMT device in the library (e.g., 'EPC2305') or list of names.
+        returns: Dictionary of HEMT parameters with their values."""
+
+        if isinstance(hemt_name, str):
+            hemt_name = [hemt_name]  # make it a list for uniform processing
 
         with open(self.hemt_lib_path, "r", encoding="utf-8") as f:
             file_text = f.read()
 
-        # find the .subckt block for the requested hemt_name only (e.g. ".subckt EPC2305 gatein drainin sourcein ... .ends")
-        device_block_re = re.compile(
-            rf'^\s*\.subckt\s+({re.escape(hemt_name)})\s+gatein\s+drainin\s+sourcein\b(.*?^\s*\.ends\b)',
-            re.DOTALL | re.MULTILINE | re.IGNORECASE)
+        all_hemt_params = {k: None for k in hemt_name}
+        for hemt in hemt_name:
+            # find the .subckt block for the requested hemt_name only (e.g. ".subckt EPC2305 gatein drainin sourcein ... .ends")
+            device_block_re = re.compile(
+                rf'^\s*\.subckt\s+({re.escape(hemt)})\s+gatein\s+drainin\s+sourcein\b(.*?^\s*\.ends\b)',
+                re.DOTALL | re.MULTILINE | re.IGNORECASE)
 
-        match = device_block_re.search(file_text)
-        self.orig_device_definition_block = match.group(0)
-        if match.group(1) != hemt_name:
-            raise ValueError(f"HEMT device {hemt_name} not found in the library file.")
+            match = device_block_re.search(file_text)
+            device_definition_block = match.group(0)
+            if match.group(1) != hemt:
+                raise ValueError(f"HEMT device {hemt} not found in the library file.")
 
-        # collect logical .param lines (handle continuation lines starting with '+')
-        param_line_matches = []
-        lines = self.orig_device_definition_block.splitlines()
-        param_line_matches = []
-        current = None
-        param_re = re.compile(r'^\s*\.param\b(.*)$', re.IGNORECASE)
-        cont_re = re.compile(r'^\s*\+(.*)$')
+            # collect logical .param lines (handle continuation lines starting with '+')
+            param_line_matches = []
+            lines = device_definition_block.splitlines()
+            param_line_matches = []
+            current = None
+            param_re = re.compile(r'^\s*\.param\b(.*)$', re.IGNORECASE)
+            cont_re = re.compile(r'^\s*\+(.*)$')
 
-        for line in lines:
-            m = param_re.match(line)
-            if m:
+            for line in lines:
+                m = param_re.match(line)
+                if m:
+                    if current is not None:
+                        param_line_matches.append(current.strip())
+                    current = m.group(1).strip()
+                    continue
+
+                cm = cont_re.match(line)
+                if cm and current is not None:
+                    current += ' ' + cm.group(1).strip()
+                    continue
+
+                # any other line ends the current .param logical line
                 if current is not None:
                     param_line_matches.append(current.strip())
-                current = m.group(1).strip()
-                continue
+                current = None
 
-            cm = cont_re.match(line)
-            if cm and current is not None:
-                current += ' ' + cm.group(1).strip()
-                continue
+            # parse key=value pairs from each logical .param line
+            epc_model_params = {}
+            for line in param_line_matches:
+                parts = re.split(r'\s+', line)
+                for part in parts:
+                    if '=' in part:
+                        k, v = part.split('=', 1)
+                        epc_model_params[k.strip()] = v.strip()
 
-            # any other line ends the current .param logical line
-            if current is not None:
-                param_line_matches.append(current.strip())
-            current = None
+            # return only parameters whose spice-names appear in the mapping values as floats
+            NUM_RE = re.compile(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?')
+            filtered_config = {k: v for k, v in epc_model_params.items() if k in set(self.epc_model_param_mapping.values())}
+            for k, v in filtered_config.items():
+                try:
+                    num_val = float(v)
+                except ValueError:
+                    m = NUM_RE.search(v[1:-1].strip() if v.startswith('{') and v.endswith('}') else v)
+                    num_val = float(m.group(0))
+                filtered_config[k] = num_val
+            
+            all_hemt_params[hemt] = (filtered_config, device_definition_block)  # add this hemt's params to results dict
 
-        # parse key=value pairs from each logical .param line
-        epc_model_params = {}
-        for line in param_line_matches:
-            parts = re.split(r'\s+', line)
-            for part in parts:
-                if '=' in part:
-                    k, v = part.split('=', 1)
-                    epc_model_params[k.strip()] = v.strip()
+        return all_hemt_params
 
-        # return only parameters whose spice-names appear in the mapping values as floats
-        NUM_RE = re.compile(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?')
-        filtered_config = {k: v for k, v in epc_model_params.items() if k in set(self.epc_model_param_mapping.values())}
-        for k, v in filtered_config.items():
-            try:
-                num_val = float(v)
-            except ValueError:
-                m = NUM_RE.search(v[1:-1].strip() if v.startswith('{') and v.endswith('}') else v)
-                num_val = float(m.group(0))
-            filtered_config[k] = num_val
+    def generate_modif_lib(self, orig_hemt_name: str='EPC2305', model_changes: dict=None):
+        """
+        model_changes: dict of {new_model_name: param_changes_dict}
+        Each param_changes_dict is {param_spice_name: new_value}
+        """
+        if model_changes is None or model_changes == {}:
+            return  # Nothing to do
 
-        return filtered_config
-    
-    def generate_modif_lib(self, hemt_param_changes: dict=None):
-        # rename the device in the matched .subckt line by appending "_modified"
-        subckt_name_re = re.compile(r'(^\s*\.subckt\s+)(\S+)', re.IGNORECASE | re.MULTILINE)
-        def _rename_subckt(m):
-            prefix, name = m.group(1), m.group(2)
-            return prefix + name + '_modified'
-        modif_dev_def_block = subckt_name_re.sub(_rename_subckt, self.orig_device_definition_block, count=1)
-
-        # apply each requested change: map friendly key -> model param name, then replace its value in the block
-        for param_spice_name in hemt_param_changes.keys():
-            if not self._is_epc_param(param_spice_name, type='spice'):
-                continue
-            # param_spice_name = self.epc_model_param_mapping[key]
-            new_val_str = repr(hemt_param_changes[param_spice_name])  # Assume numeric types only for now (repr->str)
-
-            # find assignments like "param=VALUE" where VALUE is either a braced expression {...} or a single token
-            pat = re.compile(r'(?<!\w)(' + re.escape(param_spice_name.rsplit('_', 1)[0]) + r')\s*=\s*(\{.*?\}|[^\s]+)', re.DOTALL | re.IGNORECASE)
-
-            def _replace_assign(m):
-                lhs = m.group(1)
-                rhs = m.group(2)
-                # braced expression: replace only the leading numeric coefficient, keep braces and any trailing variable/expression
-                if rhs.startswith('{') and rhs.endswith('}'):
-                    inner = rhs[1:-1]
-                    # match a leading numeric coefficient (with optional sign and exponent) and optional remainder (e.g. *aWg)
-                    m2 = re.match(r'\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(.*)$', inner)
-                    if m2:
-                        rest = m2.group(2) or ''
-                        # remove extraneous whitespace around the remainder to preserve compact form like "*aWg"
-                        rest = re.sub(r'\s+', '', rest)
-                        # construct replacement preserving single braces
-                        return lhs + '={' + new_val_str + rest + '}'
-                    # if no leading numeric found, fall back to replacing entire RHS with the new value (preserve braces)
-                    return lhs + '={' + new_val_str + '}'
-                else:
-                    # non-braced RHS: replace whole token
-                    return f"{lhs}={new_val_str}"
-
-            modif_dev_def_block = pat.sub(_replace_assign, modif_dev_def_block)
-
+        # Read the original file and extract the original text
         lib_path = Path(self.hemt_lib_path)
-
-        # read original file, replace the matched device block with the modified block
         with open(lib_path, 'r', encoding='utf-8') as f:
-            orig_text = f.read()
-
+            orig_lib_text = f.read()
+    
+        # Find the marker and cut everything after it
         marker_re = re.compile(r'(?m)^.*\*\*\*MODIFIED MODELS FOLLOW THIS COMMENT\*\*\*.*$')
-        m_marker = marker_re.search(orig_text)
-        if m_marker:
-            cut_pos = m_marker.end()
-            out_text = orig_text[:cut_pos] + '\n' + modif_dev_def_block
-        else:
+        m_marker = marker_re.search(orig_lib_text)
+        if not m_marker:
             raise ValueError("Marker for modified models not found in library file. Please add a line with '***MODIFIED MODELS FOLLOW THIS COMMENT***' after all original models")
-
-        # write the modified content back using standard open/write
+        cut_pos = m_marker.end()
+        out_text = orig_lib_text[:cut_pos] + '\n'
+        separator_string = '* ------------------ Modified Model ------------------ \n'
+    
+        # Find the original device definition block
+        device_block_re = re.compile(
+            rf'^\s*\.subckt\s+({re.escape(orig_hemt_name)})\s+gatein\s+drainin\s+sourcein\b(.*?^\s*\.ends\b)',
+            re.DOTALL | re.MULTILINE | re.IGNORECASE)
+        match = device_block_re.search(orig_lib_text)
+        if not match:
+            raise ValueError(f"HEMT device {orig_hemt_name} not found in the library file.")
+        orig_device_definition_block = match.group(0)
+    
+        # For each new model, create a modified block and append it
+        for new_hemt_name, hemt_param_changes in model_changes.items():
+            # Rename the device in the .subckt line to new_hemt_name
+            subckt_name_re = re.compile(r'(^\s*\.subckt\s+)(\S+)', re.IGNORECASE | re.MULTILINE)
+            def _rename_subckt(m):
+                prefix, name = m.group(1), m.group(2)
+                return prefix + new_hemt_name
+            modif_dev_def_block = subckt_name_re.sub(_rename_subckt, orig_device_definition_block, count=1)
+    
+            # Apply parameter changes (reuse original logic)
+            for param_spice_name in hemt_param_changes.keys():
+                if not self._is_epc_param(param_spice_name, type='spice'):
+                    continue
+                new_val_str = repr(hemt_param_changes[param_spice_name])
+                pat = re.compile(r'(?<!\w)(' + re.escape(param_spice_name.rsplit('_', 1)[0]) + r')\s*=\s*(\{.*?\}|[^\s]+)', re.DOTALL | re.IGNORECASE)
+                def _replace_assign(m):
+                    lhs = m.group(1)
+                    rhs = m.group(2)
+                    if rhs.startswith('{') and rhs.endswith('}'):
+                        inner = rhs[1:-1]
+                        m2 = re.match(r'\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(.*)$', inner)
+                        if m2:
+                            rest = m2.group(2) or ''
+                            rest = re.sub(r'\s+', '', rest)
+                            return lhs + '={' + new_val_str + rest + '}'
+                        return lhs + '={' + new_val_str + '}'
+                    else:
+                        return f"{lhs}={new_val_str}"
+                modif_dev_def_block = pat.sub(_replace_assign, modif_dev_def_block)
+    
+            # Append the modified block
+            out_text += separator_string + modif_dev_def_block + '\n'
+    
+        # Write the modified content back
         with open(lib_path, 'w', encoding='utf-8') as f:
             f.write(out_text)
 
@@ -279,3 +306,16 @@ class LtSimConfiguration:
 # for func, val in zip(doo, vals):
 #     for i in range(1, 11):
 #         print(".param ", func(i)," = ", val)
+
+
+if __name__ == "__main__":
+    
+    sim_config = LtSimConfiguration()
+    a_dict = sim_config.get_hemt_parameters_from_lib(hemt_name='EPC2305')
+    a_dict = sim_config.get_hemt_parameters_from_lib(hemt_name=['EPC2305', 'EPC2305_modified'])
+
+    model_changes = {
+    'EPC2305_mod1': {'A1': 1.2, 'k2': 2.3},
+    'EPC2305_modified': {}
+    }
+    sim_config.generate_modif_lib(orig_hemt_name='EPC2305', model_changes=model_changes)

@@ -10,9 +10,16 @@ from ResultPlotting import generate_sweep_plots, generate_perturbation_plots, ge
 def update_netlist_params(new_cnfg: dict, netlist):
     # Update all params & sim command
     netlist.add_instruction(f".tran {2*max([new_cnfg[f"T_sw_{i}"] for i in range(1, N_devices + 1)])*1e6:.3}u")
-    for k in sorted(new_cnfg.keys()):
-        netlist.set_parameter(k, new_cnfg[k])
-
+    for k, v in sorted(new_cnfg.items()):
+        if isinstance(v, str):
+            # This can be removed when Nuno fixes the AscEditor issue with string params
+            netlist.remove_Xinstruction(search_pattern=rf'^\.param\s+{k}\b')
+            netlist.set_parameter(k, f'"{v}"')
+        elif isinstance(v, float) or isinstance(v, int):
+            netlist.set_parameter(k, v)
+        else:
+            raise ValueError(f"Unsure if parameter type is supported for {k}: {type(v)}")
+        
     # Update gate driving voltage sources
     for i in range(1, N_devices + 1):
         new_cnfg[f"T_on_{i}"] = new_cnfg[f"D_on_{i}"] * new_cnfg[f"T_sw_{i}"]
@@ -30,11 +37,29 @@ def update_netlist_params(new_cnfg: dict, netlist):
                                                                                         tsw=new_cnfg[f"T_sw_{i}"] * 1e6)
         netlist.set_component_value(f'Vgdrv{i}', driver_cmd)
 
-def update_device_models(new_cnfg: dict):
-    # Update HEMT definition:
-    for i in range(1, N_devices + 1):  # only for first subckt
-        netlist.set_parameter(f'dev_{i}', 0)  # Reset to default first
-    netlist.set_parameter('dev_1', 1)  # Set to changed
+def reset_and_trim_netlist(base_config_dict: dict, new_cnfg: dict, netlist):
+    # reset netlist due to removed hemts or changed params
+    netlist.reset_netlist()
+    # Adjust number of devices in the netlist
+    for i in range(N_devices + 1, TOTAL_DRAWN_DEVICES + 1):
+        netlist.remove_component(f'X{i}')
+        netlist.remove_component(f'XG{i}')
+        netlist.remove_component(f'Vgdrv{i}')
+        netlist.remove_component(f'R{i}')
+        netlist.remove_component(f'R_{i-1}{i}')
+    
+    # Check for EPC parameters that differ from the base configuration
+    changed_params_by_device = {}
+    for i in range(1, N_devices + 1):
+        # new_cnfg['A1_1']=10
+        device_key = new_cnfg[f'dev_{i}']
+        changed_params = {k: v for k, v in new_cnfg.items() if k.endswith(f'_{i}') and base_config_dict[k] != v}
+        if changed_params:
+            changed_params_by_device[device_key + f'_{i}'] = changed_params
+            new_cnfg[f'dev_{i}'] = device_key + f'_{i}'
+        # Update changed params
+        
+    SimConfig.generate_modif_lib(orig_hemt_name=device_key, model_changes=changed_params_by_device)
 
 def introduce_meas_commands(new_cnfg: dict, netlist):
     # Remove existing .meas commands
@@ -79,7 +104,7 @@ netlist = AscEditor(sim_path)
 
 TOTAL_DRAWN_DEVICES = 10
 
-N_devices = 10
+N_devices = 4
 if N_devices > TOTAL_DRAWN_DEVICES:
     raise ValueError("N_devices exceeds the number of devices drawn in the netlist")
 # Electrical testing setpoint:
@@ -104,7 +129,8 @@ base_config_dict = {
 
 for i in range(1, N_devices + 1):
     # HEMT device param
-    base_config_dict[f'dev_{i}'] = 0  # 0: default model, 1: modified model
+    base_config_dict[f'dev_{i}'] = "EPC2305"  # "use default names from lib"
+    
     # HEMT cell params
     base_config_dict[f"R_drain_{i}"] = 1e-3
     base_config_dict[f"L_drain_{i}"] = 1e-9
@@ -127,8 +153,10 @@ for i in range(1, N_devices + 1):
     base_config_dict[f"D_on_{i}"] = 0.5
 
     # HEMT model params
-    base_config_dict.update({k + f'_{i}': v for k, v in hemt_base_config.items()})
-    SimConfig.base_cnfg_dict = base_config_dict
+    hemt_i_base_config = SimConfig.get_hemt_parameters_from_lib()[base_config_dict[f'dev_{i}']][0]
+    base_config_dict.update({k + f'_{i}': v for k, v in hemt_i_base_config.items()})
+
+SimConfig.base_cnfg_dict = base_config_dict.copy()
 
 # Define simulation type and parameter variations
 SIM_TYPE = 'perturbation'  # 'sweep', 'perturbation', 'multiparam'
@@ -155,14 +183,14 @@ elif SIM_TYPE == 'perturbation':
     # SimConfig.add_param_perturbation("T_sw_1", perturb_rel=0.1)
 
     # HEMT model perturbations
-    SimConfig.add_param_perturbation('Vgs_th_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('k_gm_factor_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Vgs_th_k_corner_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Rds_on_base_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('gm_Tc_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Rds_on_Tc_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Vgs_th_Tc_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Rgate_int_1', perturb_abs=0.05)
+    # SimConfig.add_param_perturbation('Vgs_th_1', perturb_rel=0.1)
+    # SimConfig.add_param_perturbation('k_gm_factor_1', perturb_rel=0.1)
+    # SimConfig.add_param_perturbation('Vgs_th_k_corner_1', perturb_rel=0.1)
+    # SimConfig.add_param_perturbation('Rds_on_base_1', perturb_rel=0.1)
+    # SimConfig.add_param_perturbation('gm_Tc_1', perturb_rel=0.1)
+    # SimConfig.add_param_perturbation('Rds_on_Tc_1', perturb_rel=0.1)
+    # SimConfig.add_param_perturbation('Vgs_th_Tc_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Rgate_int_1', perturb_abs=0.1)
     # SimConfig.add_param_perturbation("D_on_1")
     # SimConfig.add_param_perturbation("R_driver_1")
     # SimConfig.add_param_perturbation("R_g_1")
@@ -180,31 +208,20 @@ else:
 #     f".include {os.path.abspath('./02 Simulations/00 ComonLibs/EPCGaN.asy')}"
 # )
 
-
-
-# Adjust number of devices in the netlist
-for i in range(N_devices + 1, TOTAL_DRAWN_DEVICES + 1):
-    netlist.remove_component(f'X{i}')
-    netlist.remove_component(f'XG{i}')
-    netlist.remove_component(f'Vgdrv{i}')
-    netlist.remove_component(f'R{i}')
-    netlist.remove_component(f'R_{i-1}{i}')
-
 start_time = time.time()
 all_meas_results = {}
 for config, changed_params in SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE):
+    # Reset netlist + trim number of devices
+    reset_and_trim_netlist(base_config_dict=SimConfig.base_cnfg_dict, new_cnfg=config, netlist=netlist)
     # Update netlist or device library, add .meas commands and run sim    
     update_netlist_params(config, netlist)
-    update_device_models(config)
-    SimConfig.generate_modif_lib(hemt_param_changes=changed_params)
     introduce_meas_commands(config, netlist)
     sim = LTC.run(netlist)
-    # netlist.reset_netlist()  # Remove existing HEMT subckt instance
     # Store the changed parameters for this sim
     log_name = sim.netlist_file.name.rstrip('.asc')
     all_meas_results[log_name] = {}
     all_meas_results[log_name]['config_changes']= changed_params
-    time.sleep(0.5)  # slight delay to avoid overloading LTSpice
+    time.sleep(1.5)  # slight delay to avoid overloading LTSpice
 
 # Wait for all the sims launched. A timeout counter from last completed sim keeps track of stalled sims
 LTC.wait_completion()
