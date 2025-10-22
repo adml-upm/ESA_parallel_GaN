@@ -1,0 +1,13 @@
+Version 4
+SymbolType BLOCK
+RECTANGLE Normal -48 -40 96 40
+WINDOW 0 25 -40 Bottom 2
+PIN -48 0 LEFT 8
+PINATTR PinName Ploss
+PINATTR SpiceOrder 1
+PIN 96 -16 RIGHT 8
+PINATTR PinName Tcase
+PINATTR SpiceOrder 2
+PIN 96 16 RIGHT 8
+PINATTR PinName Tref
+PINATTR SpiceOrder 3
