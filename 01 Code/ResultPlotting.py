@@ -1,7 +1,7 @@
-import matplotlib
-matplotlib.use('Agg')
+# import matplotlib
+# matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-plt.ioff()  # Turn off interactive mode
+# plt.ioff()  # Turn off interactive mode
 import numpy as np
 import os
 from spicelib.editor.base_editor import format_eng, scan_eng
@@ -223,7 +223,7 @@ def generate_perturbation_heat_map(params_to_plot, meas_res, skip_branches=None,
         output_folder = os.path.dirname(os.path.dirname(__file__))
         # os.makedirs(output_folder, exist_ok=True)
 
-        plt.savefig(os.path.join(output_folder, 'plots', f'perturbation_heat_map.png'))
+        plt.savefig(os.path.join(output_folder, 'plots', 'perturbation_heat_map.png'))
         plt.close()
 
 
