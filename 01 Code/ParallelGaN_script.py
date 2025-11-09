@@ -1,10 +1,10 @@
 from PyLTSpice import SimRunner
 from PyLTSpice import AscEditor
-# from PyLTSpice import RawRead
+from PyLTSpice import RawRead
 from PyLTSpice.log.ltsteps import LTSpiceLogReader
 import time
 from SimConfiguration import LtSimConfiguration
-from ResultPlotting import generate_sweep_plots, generate_perturbation_plots, generate_perturbation_heat_map
+from ResultPlotting import generate_sweep_plots, generate_perturbation_barplots, generate_perturbation_heat_map, plot_wfm_from_all_runs
 
 
 def update_netlist_params(new_cnfg: dict, netlist):
@@ -80,14 +80,21 @@ def introduce_meas_commands(new_cnfg: dict, netlist):
         Vds_pk_times = [T_sw + tdrv_r + T_on_i, T_sw + tdrv_r + T_on_i + T_off / 2]
         # Vgs Overshoot params
         Vgs_pk_times = [T_sw, T_sw + tdrv_r + T_on_i / 2]
-    
+        # RMS conduction current measurement triggers
+        ich_min = 0.05 * new_cnfg['I_DC'] / N_devices
+        ich_rise_delay = 10e-6
+        vch_min = 0.05 * new_cnfg['V_DC']
+        ich_fall_delay = 15e-6
+
         loss_param = f"V(G{i})*Ix(X{i}:U1:gatein)+V(D{i})*Ix(X{i}:U1:drainin)+V(X{i}:hemt_s_noLs)*Ix(X{i}:U1:sourcein)"
         netlist.add_instructions(
-            f".meas X{i}_cond_current FIND I(X{i}:R_drain) AT {1e6*t_on_curr_meas:.6}u",
+            f".meas X{i}_rms_cond RMS I(x{i}:L_drain) TRIG I(x{i}:L_drain)={ich_min} TD={1e6*ich_rise_delay}u RISE=1 TARG V(D{i},S{i})={vch_min} TD={1e6*ich_fall_delay}u RISE=1",
+            # f".meas X{i}_cond_current FIND I(X{i}:R_drain) AT {1e6*t_on_curr_meas:.6}u",
             f".meas X{i}_E_on INTEG {loss_param} FROM {1e6*P_on_times[0]:.6}u TO {1e6*P_on_times[1]:.6}u",
             f".meas X{i}_E_off INTEG {loss_param} FROM {1e6*P_off_times[0]:.6}u TO {1e6*P_off_times[1]:.6}u",
             f".meas X{i}_vds_pk MAX V(D{i},X{i}:hemt_s_noLs) FROM {1e6*Vds_pk_times[0]:.6}u TO {1e6*Vds_pk_times[1]:.6}u",
-            f".meas X{i}_vgs_pk MAX V(G{i},X{i}:hemt_s_noLs) FROM {1e6*Vgs_pk_times[0]:.6}u TO {1e6*Vgs_pk_times[1]:.6}u",        
+            f".meas X{i}_vgs_pk MAX V(G{i},X{i}:hemt_s_noLs) FROM {1e6*Vgs_pk_times[0]:.6}u TO {1e6*Vgs_pk_times[1]:.6}u",
+            
         )
     
 
@@ -188,8 +195,8 @@ elif SIM_TYPE == 'perturbation':
     # SimConfig.add_param_perturbation('Vgs_th_k_corner_1', perturb_rel=0.1)
     # SimConfig.add_param_perturbation('Rds_on_base_1', perturb_rel=0.1)
     # SimConfig.add_param_perturbation('gm_Tc_1', perturb_rel=0.1)
-    # SimConfig.add_param_perturbation('Rds_on_Tc_1', perturb_rel=0.1)
-    # SimConfig.add_param_perturbation('Vgs_th_Tc_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Rds_on_Tc_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Vgs_th_Tc_1', perturb_rel=0.1)
     SimConfig.add_param_perturbation('Rgate_int_1', perturb_abs=0.1)
     # SimConfig.add_param_perturbation("D_on_1")
     # SimConfig.add_param_perturbation("R_driver_1")
@@ -230,9 +237,16 @@ print('Successful/Total Simulations: ' + str(LTC.okSim) + '/' + str(LTC.runno))
 
 for raw, log in LTC:
     # print("Raw file: %s, Log file: %s" % (raw, log))
-    # raw_data = RawRead(raw)
-    # i_drain_sw1_r = raw_data.get_trace('I(R1)')
-    # i_drain_sw1_l = raw_data.get_trace('I(x1:L_drain)')
+    raw_data = RawRead(raw)
+    # Store the extracted waveforms in the results dictionary
+    sim_time = [abs(t) for t in list(raw_data.get_trace('time'))]  # Necessary due to LTSpice bug printing negative time sometimes
+    all_meas_results[log.stem]['waveforms'] = {'time': sim_time}
+    for i in range(1, N_devices + 1):
+        all_meas_results[log.stem]['waveforms'][f'i_drain_{i}'] = list(raw_data.get_trace(f'I(x{i}:L_drain)'))
+        vgate = list(raw_data.get_trace(f'V(G{i})'))
+        vsource = list(raw_data.get_trace(f'V(S{i})'))
+        all_meas_results[log.stem]['waveforms'][f'v_gs_{i}'] = [vgate[j] - vsource[j] for j in range(len(vgate))]
+    
     # print(f"Trace length is {len(i_drain_sw1_r)} and they match: {i_drain_sw1_r == i_drain_sw1_l}")
     # # print(raw_data.get_trace_names())
     # time = list(raw_data.get_trace('time'))
@@ -264,10 +278,17 @@ elif SIM_TYPE == 'perturbation':
     #                      skip_branches=['x3', 'x4'], base_config=base_config_dict, save_figs=True)
     generate_perturbation_heat_map(params_to_plot=SimConfig.params_to_plot,
                                    meas_res=all_meas_results,
-                                   skip_branches=['x3', 'x4'],
+                                   skip_branches=list(range(3, N_devices + 1)),
                                    base_config=base_config_dict,
                                    k_perturb=SimConfig.default_Kperturb,
-                                   save_figs=True)
+                                   save_figs=False)
+    
+    plot_wfm_from_all_runs(meas_res=all_meas_results,
+                           explicit_wfms=[],
+                           skip_branches=list(range(3, N_devices + 1)),
+                           base_config=base_config_dict,
+                           edge='rise',
+                           save_figs=False)
 elif SIM_TYPE == 'multiparam':
     raise Exception("multiparam sim not implemented")
 else:
