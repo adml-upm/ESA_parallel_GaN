@@ -5,98 +5,7 @@ from PyLTSpice.log.ltsteps import LTSpiceLogReader
 import time
 from SimConfiguration import LtSimConfiguration
 from ResultPlotting import generate_sweep_plots, generate_perturbation_barplots, generate_perturbation_heat_map, plot_wfm_from_all_runs
-
-
-def update_netlist_params(new_cnfg: dict, netlist):
-    # Update all params & sim command
-    netlist.add_instruction(f".tran {2*max([new_cnfg[f"T_sw_{i}"] for i in range(1, N_devices + 1)])*1e6:.3}u")
-    for k, v in sorted(new_cnfg.items()):
-        if isinstance(v, str):
-            # This can be removed when Nuno fixes the AscEditor issue with string params
-            netlist.remove_Xinstruction(search_pattern=rf'^\.param\s+{k}\b')
-            netlist.set_parameter(k, f'"{v}"')
-        elif isinstance(v, float) or isinstance(v, int):
-            netlist.set_parameter(k, v)
-        else:
-            raise ValueError(f"Unsure if parameter type is supported for {k}: {type(v)}")
-        
-    # Update gate driving voltage sources
-    for i in range(1, N_devices + 1):
-        new_cnfg[f"T_on_{i}"] = new_cnfg[f"D_on_{i}"] * new_cnfg[f"T_sw_{i}"]
-        
-        T_on_corr = new_cnfg[f"T_on_{i}"] - (new_cnfg[f"tdrv_rise_{i}"] + new_cnfg[f"tdrv_fall_{i}"]) / 2
-        new_cnfg[f"T_on_corr_{i}"] = T_on_corr
-        new_cnfg[f"T_off_{i}"] = new_cnfg[f"T_sw_{i}"] - new_cnfg[f"T_on_{i}"] - new_cnfg[f"tdrv_rise_{i}"] - new_cnfg[f"tdrv_fall_{i}"]
-        new_cnfg[f"T_off_corr_{i}"] = new_cnfg[f"T_sw_{i}"] - T_on_corr
-        driver_cmd = "PULSE({voff} {von} {d} {tr:.3}n {tf:.3}n {ton:.5}u {tsw:.5}u)".format(voff=new_cnfg[f"Vdrv_off_{i}"],
-                                                                                        von=new_cnfg[f"Vdrv_on_{i}"],
-                                                                                        d=new_cnfg[f"Vdrive_delay_{i}"],
-                                                                                        tr=new_cnfg[f"tdrv_rise_{i}"] * 1e9,
-                                                                                        tf=new_cnfg[f"tdrv_fall_{i}"] * 1e9,
-                                                                                        ton=new_cnfg[f"T_on_corr_{i}"] * 1e6,
-                                                                                        tsw=new_cnfg[f"T_sw_{i}"] * 1e6)
-        netlist.set_component_value(f'Vgdrv{i}', driver_cmd)
-
-def reset_and_trim_netlist(base_config_dict: dict, new_cnfg: dict, netlist):
-    # reset netlist due to removed hemts or changed params
-    netlist.reset_netlist()
-    # Adjust number of devices in the netlist
-    for i in range(N_devices + 1, TOTAL_DRAWN_DEVICES + 1):
-        netlist.remove_component(f'X{i}')
-        netlist.remove_component(f'XG{i}')
-        netlist.remove_component(f'Vgdrv{i}')
-        netlist.remove_component(f'R{i}')
-        netlist.remove_component(f'R_{i-1}{i}')
-    
-    # Check for EPC parameters that differ from the base configuration
-    changed_params_by_device = {}
-    for i in range(1, N_devices + 1):
-        # new_cnfg['A1_1']=10
-        device_key = new_cnfg[f'dev_{i}']
-        changed_params = {k: v for k, v in new_cnfg.items() if k.endswith(f'_{i}') and base_config_dict[k] != v}
-        if changed_params:
-            changed_params_by_device[device_key + f'_{i}'] = changed_params
-            new_cnfg[f'dev_{i}'] = device_key + f'_{i}'
-        # Update changed params
-        
-    SimConfig.generate_modif_lib(orig_hemt_name=device_key, model_changes=changed_params_by_device)
-
-def introduce_meas_commands(new_cnfg: dict, netlist):
-    # Remove existing .meas commands
-    netlist.remove_Xinstruction(search_pattern='.meas')
-    for i in range(1, N_devices + 1):
-        T_sw   = new_cnfg[f"T_sw_{i}"]
-        T_on_i = new_cnfg[f"T_on_{i}"]
-        tdrv_r = new_cnfg[f"tdrv_rise_{i}"] 
-        T_off  = new_cnfg[f"T_off_{i}"]
-
-        # Current balance measurements
-        t_on_curr_meas = T_sw + tdrv_r + T_on / 2  # Midway through on-time of second cycle
-        # Power Loss measurements
-        delta_t_loss_meas = min(500e-9, T_on_i * 0.025)
-        P_on_times  = [T_sw, T_sw + delta_t_loss_meas]
-        P_off_times = [T_sw, T_on_i + tdrv_r + T_on_i + delta_t_loss_meas]
-        # Vds Overshoot params
-        Vds_pk_times = [T_sw + tdrv_r + T_on_i, T_sw + tdrv_r + T_on_i + T_off / 2]
-        # Vgs Overshoot params
-        Vgs_pk_times = [T_sw, T_sw + tdrv_r + T_on_i / 2]
-        # RMS conduction current measurement triggers
-        ich_min = 0.05 * new_cnfg['I_DC'] / N_devices
-        ich_rise_delay = 10e-6
-        vch_min = 0.05 * new_cnfg['V_DC']
-        ich_fall_delay = 15e-6
-
-        loss_param = f"V(G{i})*Ix(X{i}:U1:gatein)+V(D{i})*Ix(X{i}:U1:drainin)+V(X{i}:hemt_s_noLs)*Ix(X{i}:U1:sourcein)"
-        netlist.add_instructions(
-            f".meas X{i}_rms_cond RMS I(x{i}:L_drain) TRIG I(x{i}:L_drain)={ich_min} TD={1e6*ich_rise_delay}u RISE=1 TARG V(D{i},S{i})={vch_min} TD={1e6*ich_fall_delay}u RISE=1",
-            # f".meas X{i}_cond_current FIND I(X{i}:R_drain) AT {1e6*t_on_curr_meas:.6}u",
-            f".meas X{i}_E_on INTEG {loss_param} FROM {1e6*P_on_times[0]:.6}u TO {1e6*P_on_times[1]:.6}u",
-            f".meas X{i}_E_off INTEG {loss_param} FROM {1e6*P_off_times[0]:.6}u TO {1e6*P_off_times[1]:.6}u",
-            f".meas X{i}_vds_pk MAX V(D{i},X{i}:hemt_s_noLs) FROM {1e6*Vds_pk_times[0]:.6}u TO {1e6*Vds_pk_times[1]:.6}u",
-            f".meas X{i}_vgs_pk MAX V(G{i},X{i}:hemt_s_noLs) FROM {1e6*Vgs_pk_times[0]:.6}u TO {1e6*Vgs_pk_times[1]:.6}u",
-            
-        )
-    
+   
 
 # Force another simulatior
 simulator = r"C:\Users\Alex\AppData\Local\Programs\ADI\LTspice\LTspice.exe"
@@ -109,10 +18,13 @@ sim_path = './02 Simulations/02 ParallelGaN/ParGan_V3.asc'
 netlist = AscEditor(sim_path)
 
 
-TOTAL_DRAWN_DEVICES = 10
 
-N_devices = 4
-if N_devices > TOTAL_DRAWN_DEVICES:
+
+SimConfig = LtSimConfiguration()
+SimConfig.N_devices = 4  # Number of parallel devices to simulate
+SimConfig.TOTAL_DRAWN_DEVICES = 10
+
+if  SimConfig.N_devices > SimConfig.TOTAL_DRAWN_DEVICES:
     raise ValueError("N_devices exceeds the number of devices drawn in the netlist")
 # Electrical testing setpoint:
 m_sweep_points = 5
@@ -126,7 +38,7 @@ T_on = D_sw * T_sw
 # ---------------------------------------------------------------
 
 # Get hemt param baseconfig and add to base_config_dict
-SimConfig = LtSimConfiguration()
+
 hemt_base_config = SimConfig.get_hemt_parameters_from_lib()
 
 base_config_dict = {
@@ -134,7 +46,7 @@ base_config_dict = {
     'I_DC': I_DC
 }
 
-for i in range(1, N_devices + 1):
+for i in range(1, SimConfig.N_devices + 1):
     # HEMT device param
     base_config_dict[f'dev_{i}'] = "EPC2305"  # "use default names from lib"
     
@@ -217,12 +129,9 @@ else:
 
 start_time = time.time()
 all_meas_results = {}
-for config, changed_params in SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE):
+for specific_config, changed_params in SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE):
     # Reset netlist + trim number of devices
-    reset_and_trim_netlist(base_config_dict=SimConfig.base_cnfg_dict, new_cnfg=config, netlist=netlist)
-    # Update netlist or device library, add .meas commands and run sim    
-    update_netlist_params(config, netlist)
-    introduce_meas_commands(config, netlist)
+    SimConfig.prepare_netlist_for_sim(new_cnfg=specific_config, netlist=netlist)
     sim = LTC.run(netlist)
     # Store the changed parameters for this sim
     log_name = sim.netlist_file.name.rstrip('.asc')
@@ -241,7 +150,7 @@ for raw, log in LTC:
     # Store the extracted waveforms in the results dictionary
     sim_time = [abs(t) for t in list(raw_data.get_trace('time'))]  # Necessary due to LTSpice bug printing negative time sometimes
     all_meas_results[log.stem]['waveforms'] = {'time': sim_time}
-    for i in range(1, N_devices + 1):
+    for i in range(1, SimConfig.N_devices + 1):
         all_meas_results[log.stem]['waveforms'][f'i_drain_{i}'] = list(raw_data.get_trace(f'I(x{i}:L_drain)'))
         vgate = list(raw_data.get_trace(f'V(G{i})'))
         vsource = list(raw_data.get_trace(f'V(S{i})'))
@@ -278,14 +187,14 @@ elif SIM_TYPE == 'perturbation':
     #                      skip_branches=['x3', 'x4'], base_config=base_config_dict, save_figs=True)
     generate_perturbation_heat_map(params_to_plot=SimConfig.params_to_plot,
                                    meas_res=all_meas_results,
-                                   skip_branches=list(range(3, N_devices + 1)),
+                                   skip_branches=list(range(3, SimConfig.N_devices + 1)),
                                    base_config=base_config_dict,
                                    k_perturb=SimConfig.default_Kperturb,
                                    save_figs=False)
     
     plot_wfm_from_all_runs(meas_res=all_meas_results,
                            explicit_wfms=[],
-                           skip_branches=list(range(3, N_devices + 1)),
+                           skip_branches=list(range(3, SimConfig.N_devices + 1)),
                            base_config=base_config_dict,
                            edge='rise',
                            save_figs=False)

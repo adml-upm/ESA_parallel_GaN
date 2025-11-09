@@ -11,6 +11,10 @@ class LtSimConfiguration:
             self.base_cnfg_dict = base_config.copy()
         else:
             self.base_cnfg_dict = {}
+
+        self.N_devices = 4
+        self.TOTAL_DRAWN_DEVICES = 10
+
         self.config_ranges = {}
         self.perturb_params = {}
         self.params_to_plot = []
@@ -150,8 +154,9 @@ class LtSimConfiguration:
     
     def modify_hemt_device_count(self, N_devices: int):
         """Modifies the number of parallel HEMT devices in the base configuration."""
+        self.N_devices = N_devices
         raise ValueError("Not yet implemented")
-        self.base_cnfg_dict['N_devices'] = N_devices
+        self.base_cnfg_dict['self.N_devices'] = self.N_devices
 
     def get_hemt_parameters_from_lib(self, hemt_name: str|list='EPC2305'):
         """Retrieves HEMT parameters from the library file.
@@ -294,7 +299,100 @@ class LtSimConfiguration:
         with open(lib_path, 'w', encoding='utf-8') as f:
             f.write(out_text)
 
+    def update_netlist_params(self, new_cnfg: dict, netlist):
+        # Update all params & sim command
+        netlist.add_instruction(f".tran {2*max([new_cnfg[f"T_sw_{i}"] for i in range(1, self.N_devices + 1)])*1e6:.3}u")
+        for k, v in sorted(new_cnfg.items()):
+            if isinstance(v, str):
+                # This can be removed when Nuno fixes the AscEditor issue with string params
+                netlist.remove_Xinstruction(search_pattern=rf'^\.param\s+{k}\b')
+                netlist.set_parameter(k, f'"{v}"')
+            elif isinstance(v, float) or isinstance(v, int):
+                netlist.set_parameter(k, v)
+            else:
+                raise ValueError(f"Unsure if parameter type is supported for {k}: {type(v)}")
+            
+        # Update gate driving voltage sources
+        for i in range(1, self.N_devices + 1):
+            new_cnfg[f"T_on_{i}"] = new_cnfg[f"D_on_{i}"] * new_cnfg[f"T_sw_{i}"]
+            
+            T_on_corr = new_cnfg[f"T_on_{i}"] - (new_cnfg[f"tdrv_rise_{i}"] + new_cnfg[f"tdrv_fall_{i}"]) / 2
+            new_cnfg[f"T_on_corr_{i}"] = T_on_corr
+            new_cnfg[f"T_off_{i}"] = new_cnfg[f"T_sw_{i}"] - new_cnfg[f"T_on_{i}"] - new_cnfg[f"tdrv_rise_{i}"] - new_cnfg[f"tdrv_fall_{i}"]
+            new_cnfg[f"T_off_corr_{i}"] = new_cnfg[f"T_sw_{i}"] - T_on_corr
+            driver_cmd = "PULSE({voff} {von} {d} {tr:.3}n {tf:.3}n {ton:.5}u {tsw:.5}u)".format(voff=new_cnfg[f"Vdrv_off_{i}"],
+                                                                                            von=new_cnfg[f"Vdrv_on_{i}"],
+                                                                                            d=new_cnfg[f"Vdrive_delay_{i}"],
+                                                                                            tr=new_cnfg[f"tdrv_rise_{i}"] * 1e9,
+                                                                                            tf=new_cnfg[f"tdrv_fall_{i}"] * 1e9,
+                                                                                            ton=new_cnfg[f"T_on_corr_{i}"] * 1e6,
+                                                                                            tsw=new_cnfg[f"T_sw_{i}"] * 1e6)
+            netlist.set_component_value(f'Vgdrv{i}', driver_cmd)
 
+    def reset_and_trim_netlist(self, new_cnfg: dict, netlist):
+        # reset netlist due to removed hemts or changed params
+        netlist.reset_netlist()
+        # Adjust number of devices in the netlist
+        for i in range(self.N_devices + 1, self.TOTAL_DRAWN_DEVICES + 1):
+            netlist.remove_component(f'X{i}')
+            netlist.remove_component(f'XG{i}')
+            netlist.remove_component(f'Vgdrv{i}')
+            netlist.remove_component(f'R{i}')
+            netlist.remove_component(f'R_{i-1}{i}')
+        
+        # Check for EPC parameters that differ from the base configuration
+        changed_params_by_device = {}
+        for i in range(1, self.N_devices + 1):
+            # new_cnfg['A1_1']=10
+            device_key = new_cnfg[f'dev_{i}']
+            changed_params = {k: v for k, v in new_cnfg.items() if k.endswith(f'_{i}') and self.base_cnfg_dict[k] != v}
+            if changed_params:
+                changed_params_by_device[device_key + f'_{i}'] = changed_params
+                new_cnfg[f'dev_{i}'] = device_key + f'_{i}'
+            # Update changed params
+            
+        self.generate_modif_lib(orig_hemt_name=device_key, model_changes=changed_params_by_device)
+
+    def introduce_meas_commands(self, new_cnfg: dict, netlist):
+        # Remove existing .meas commands
+        netlist.remove_Xinstruction(search_pattern='.meas')
+        for i in range(1, self.N_devices + 1):
+            T_sw   = new_cnfg[f"T_sw_{i}"]
+            T_on_i = new_cnfg[f"T_on_{i}"]
+            tdrv_r = new_cnfg[f"tdrv_rise_{i}"] 
+            T_off  = new_cnfg[f"T_off_{i}"]
+
+            # Current balance measurements
+            t_on_curr_meas = T_sw + tdrv_r + T_on_i / 2  # Midway through on-time of second cycle
+            # Power Loss measurements
+            delta_t_loss_meas = min(500e-9, T_on_i * 0.025)
+            P_on_times  = [T_sw, T_sw + delta_t_loss_meas]
+            P_off_times = [T_sw, T_on_i + tdrv_r + T_on_i + delta_t_loss_meas]
+            # Vds Overshoot params
+            Vds_pk_times = [T_sw + tdrv_r + T_on_i, T_sw + tdrv_r + T_on_i + T_off / 2]
+            # Vgs Overshoot params
+            Vgs_pk_times = [T_sw, T_sw + tdrv_r + T_on_i / 2]
+            # RMS conduction current measurement triggers
+            ich_min = 0.05 * new_cnfg['I_DC'] / self.N_devices
+            ich_rise_delay = 10e-6
+            vch_min = 0.05 * new_cnfg['V_DC']
+            ich_fall_delay = 15e-6
+
+            loss_expression = f"V(G{i})*Ix(X{i}:U1:gatein)+V(D{i})*Ix(X{i}:U1:drainin)+V(X{i}:hemt_s_noLs)*Ix(X{i}:U1:sourcein)"
+            netlist.add_instructions(
+                f".meas X{i}_rms_cond RMS I(x{i}:L_drain) TRIG I(x{i}:L_drain)={ich_min} TD={1e6*ich_rise_delay}u RISE=1 TARG V(D{i},S{i})={vch_min} TD={1e6*ich_fall_delay}u RISE=1",
+                # f".meas X{i}_cond_current FIND I(X{i}:R_drain) AT {1e6*t_on_curr_meas:.6}u",
+                f".meas X{i}_E_on INTEG {loss_expression} FROM {1e6*P_on_times[0]:.6}u TO {1e6*P_on_times[1]:.6}u",
+                f".meas X{i}_E_off INTEG {loss_expression} FROM {1e6*P_off_times[0]:.6}u TO {1e6*P_off_times[1]:.6}u",
+                f".meas X{i}_vds_pk MAX V(D{i},X{i}:hemt_s_noLs) FROM {1e6*Vds_pk_times[0]:.6}u TO {1e6*Vds_pk_times[1]:.6}u",
+                f".meas X{i}_vgs_pk MAX V(G{i},X{i}:hemt_s_noLs) FROM {1e6*Vgs_pk_times[0]:.6}u TO {1e6*Vgs_pk_times[1]:.6}u",
+            )
+
+    def prepare_netlist_for_sim(self, new_cnfg: dict, netlist):
+        # Run all necessary steps to prepare netlist for simulation
+        self.reset_and_trim_netlist(new_cnfg=new_cnfg, netlist=netlist)
+        self.update_netlist_params(new_cnfg=new_cnfg, netlist=netlist)
+        self.introduce_meas_commands(new_cnfg=new_cnfg, netlist=netlist)
 
 
 # Useful for starting values of sim V3:
