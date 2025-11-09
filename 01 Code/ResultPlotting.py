@@ -109,7 +109,7 @@ def generate_sweep_plots(params_to_plot, meas_res, skip_branches=None, save_figs
             plt.savefig(plot_path)
             plt.close()  # Recommended for memory management when generating many plots
 
-def generate_perturbation_plots(params_to_plot, meas_res, skip_branches=None, base_config=None, save_figs=True):
+def generate_perturbation_barplots(params_to_plot, meas_res, skip_branches=None, base_config=None, save_figs=True):
     # Remove first sim of all (base case) if present
     base_meas_res = meas_res.pop(sorted(meas_res.keys())[0], None)
 
@@ -186,7 +186,7 @@ def generate_perturbation_heat_map(params_to_plot, meas_res, skip_branches=None,
                 continue
 
             for meas_key, meas_val in sim_dict['meas results'].items():
-                if any([skip_substring in meas_key for skip_substring in skip_branches]):
+                if any([str(skip_int) in meas_key for skip_int in skip_branches]):
                     continue
                 base_val = base_meas_res['meas results'][meas_key]
                 try:
@@ -226,7 +226,104 @@ def generate_perturbation_heat_map(params_to_plot, meas_res, skip_branches=None,
         plt.savefig(os.path.join(output_folder, 'plots', 'perturbation_heat_map.png'))
         plt.close()
 
+def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_config=None, edge=None, save_figs=True):
+    """Plot waveforms from all simulation runs, grouping by waveform names.
+    Alternatively, only plot specific waveforms if provided.
+    if skip_branches is none and meas_res only has data from a single sim, a single sim can be analyzed
+    Args:
+        meas_res (dict): Measurement results from simulations.
+        explicit_wfms (list, optional): List of specific waveform names to plot. Defaults to [] (plot all).
+        skip_branches (list, optional): List of branch identifiers to skip in plotting. Defaults to None.
+        time_scale (list, optional): Time scale [start, end] in seconds for x-axis. Defaults to [] (full scale).
+        save_figs (bool, optional): Whether to save figures or show them. Defaults to True.
+    """
+    # Collect all waveforms and group them by common keys
+    grouped_waveforms = {}
+    for sim_name, sim_meas in meas_res.items():
+        sim_waveforms = sim_meas.get('waveforms', {})
+        param_changes = sim_meas.get('config_changes', {})
+        wfm_time = sim_waveforms.get('time', [])
+        for wfm_name, wfm_data in sim_waveforms.items():
+            if not not explicit_wfms:  # checks if empty list
+                if '_'.join(wfm_name.split('_')[:-1]) not in explicit_wfms:
+                    continue  # Only plot specified waveforms if provided
+
+            if wfm_name == 'time':
+                continue  # Skip time waveform, previously extracted
+
+            if wfm_name not in grouped_waveforms:
+                grouped_waveforms[wfm_name] = []
+            grouped_waveforms[wfm_name].append((sim_name, wfm_time, wfm_data))
 
 
-    
-            
+    # Filter out waveforms based on skip_branches
+    if skip_branches:
+        grouped_waveforms = {
+            k: v for k, v in grouped_waveforms.items()
+            if not any(k.endswith(f'_{branch}') for branch in skip_branches)
+        }
+
+    # Group waveforms by suffix and sort
+    suffix_groups = {
+        suffix: sorted([wfm for wfm in grouped_waveforms if wfm.endswith(f'_{suffix}')])
+        for suffix in sorted(set(wfm.split('_')[-1] for wfm in grouped_waveforms))
+    }
+    sorted_suffixes = sorted(suffix_groups, key=lambda x: int(x) if x.isdigit() else x)
+
+    # Determine subplot layout
+    n_cols, n_rows = len(sorted_suffixes), max(len(suffix_groups[suffix]) for suffix in sorted_suffixes)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), sharex=False, sharey=True)
+    axes = np.atleast_2d(axes)
+
+    # Plot waveforms
+    for col, suffix in enumerate(sorted_suffixes):
+        for row, wfm_name in enumerate(suffix_groups[suffix]):
+            ax = axes[row, col]
+            for sim_name, wfm_time, wfm_data in grouped_waveforms[wfm_name]:
+                ax.plot(np.array(wfm_time) * 1e6, wfm_data, label=f'Sim: {sim_name}')
+
+                if edge == 'rise' and base_config is not None:
+                    ti = base_config[f"Vdrive_delay_{col+1}"] + base_config[f"T_sw_{col+1}"]
+                    tf = ti + 100e-9  # 100 ns after rising starts
+                    ax.set_xlim(ti * 1e6, tf * 1e6)
+                elif edge == 'fall':
+                    list_of_key = [f"Vdrive_delay_{col+1}", f"T_sw_{col+1}", f"T_on_{col+1}", f"tdrv_rise_{col+1}"]
+                    ti = sum([base_config[k] for k in list_of_key])
+                    tf = ti + 50e-9  # 100 ns after falling starts
+                    ax.set_xlim(ti * 1e6, tf * 1e6)
+                else:
+                    pass  # Full scale
+                
+            ax.set(title=wfm_name, xlabel='Time [µs]', ylabel='Amplitude')
+            ax.legend(loc='best')
+            ax.grid(True)
+
+    # Hide unused subplots
+    for row in range(n_rows):
+        for col in range(n_cols):
+            if col >= len(sorted_suffixes) or row >= len(suffix_groups[sorted_suffixes[col]]):
+                axes[row][col].axis('off')
+
+    plt.tight_layout()
+    plt.suptitle(f'Waveforms from {"All" if len(meas_res) > 1 else "Selected"} Simulations', y=1.02)
+
+    if not save_figs:
+        plt.show()
+    else:
+        output_folder = './plots'
+        os.makedirs(output_folder, exist_ok=True)
+        for wfm_name in grouped_waveforms.keys():
+            plot_path = os.path.join(output_folder, f'wfm_{wfm_name}_all_runs.png')
+            plt.savefig(plot_path)
+        plt.close()
+
+def calculate_time_limits_for_plots(meas_res, base_config, edge='rise'):
+    """Calculate appropriate time limits for waveform plots based on base configuration.
+
+    Args:
+        meas_res (dict): Measurement results from simulations.
+        base_config (dict): Base configuration dictionary.
+        edge (str, optional): Edge type to consider ('rise' or 'fall'). Defaults to 'rise'.
+    Returns:
+        tuple: (time_start, time_end) in seconds.
+    """
