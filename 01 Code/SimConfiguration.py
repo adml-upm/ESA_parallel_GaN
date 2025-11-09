@@ -6,11 +6,14 @@ from pathlib import Path
 import shutil
 
 class LtSimConfiguration:
-    def __init__(self, base_config: dict = None):
+    def __init__(self, base_config: dict = None, sim_output_folder: str = None):
         if base_config:
             self.base_cnfg_dict = base_config.copy()
         else:
             self.base_cnfg_dict = {}
+        
+
+        self.sim_output_folder = sim_output_folder
 
         self.N_devices = 4
         self.TOTAL_DRAWN_DEVICES = 10
@@ -231,6 +234,64 @@ class LtSimConfiguration:
 
         return all_hemt_params
 
+    def generate_modif_device_models(self, orig_hemt_name: str='EPC2305', model_changes: dict=None):
+        """
+        model_changes: dict of {new_model_name: param_changes_dict}
+        Each param_changes_dict is {param_spice_name: new_value}
+        """
+        if model_changes is None or model_changes == {}:
+            return []  # Nothing to do
+
+        # Read the original file and extract the original text
+        lib_path = Path(self.hemt_lib_path)
+        with open(lib_path, 'r', encoding='utf-8') as f:
+            orig_lib_text = f.read()
+        
+        # Find the original device definition block
+        device_block_re = re.compile(
+            rf'^\s*\.subckt\s+({re.escape(orig_hemt_name)})\s+gatein\s+drainin\s+sourcein\b(.*?^\s*\.ends\b)',
+            re.DOTALL | re.MULTILINE | re.IGNORECASE)
+        match = device_block_re.search(orig_lib_text)
+        if not match:
+            raise ValueError(f"HEMT device {orig_hemt_name} not found in the library file.")
+        orig_device_definition_block = match.group(0)
+        
+        # For each new model, create a modified block and collect it
+        modified_blocks = []
+        for new_hemt_name, hemt_param_changes in model_changes.items():
+            # Rename the device in the .subckt line to new_hemt_name
+            subckt_name_re = re.compile(r'(^\s*\.subckt\s+)(\S+)', re.IGNORECASE | re.MULTILINE)
+            def _rename_subckt(m):
+                prefix, name = m.group(1), m.group(2)
+                return prefix + new_hemt_name
+            modif_dev_def_block = subckt_name_re.sub(_rename_subckt, orig_device_definition_block, count=1)
+        
+            # Apply parameter changes (reuse original logic)
+            for param_spice_name in hemt_param_changes.keys():
+                if not self._is_epc_param(param_spice_name, type='spice'):
+                    continue    
+                new_val_str = repr(hemt_param_changes[param_spice_name])
+                pat = re.compile(r'(?<!\w)(' + re.escape(param_spice_name.rsplit('_', 1)[0]) + r')\s*=\s*(\{.*?\}|[^\s]+)', re.DOTALL | re.IGNORECASE)
+                def _replace_assign(m):
+                    lhs = m.group(1)
+                    rhs = m.group(2)
+                    if rhs.startswith('{') and rhs.endswith('}'):
+                        inner = rhs[1:-1]
+                        m2 = re.match(r'\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(.*)$', inner)
+                        if m2:
+                            rest = m2.group(2) or ''
+                            rest = re.sub(r'\s+', '', rest)
+                            return lhs + '={' + new_val_str + rest + '}'
+                        return lhs + '={' + new_val_str + '}'
+                    else:
+                        return f"{lhs}={new_val_str}"
+                modif_dev_def_block = pat.sub(_replace_assign, modif_dev_def_block)
+        
+            # Collect the modified block
+            modified_blocks.append(modif_dev_def_block)
+        
+        return modified_blocks
+
     def generate_modif_lib(self, orig_hemt_name: str='EPC2305', model_changes: dict=None):
         """
         model_changes: dict of {new_model_name: param_changes_dict}
@@ -329,7 +390,7 @@ class LtSimConfiguration:
                                                                                             tsw=new_cnfg[f"T_sw_{i}"] * 1e6)
             netlist.set_component_value(f'Vgdrv{i}', driver_cmd)
 
-    def reset_and_trim_netlist(self, new_cnfg: dict, netlist):
+    def reset_and_trim_netlist(self, new_cnfg: dict, netlist, sim_index: int):
         # reset netlist due to removed hemts or changed params
         netlist.reset_netlist()
         # Adjust number of devices in the netlist
@@ -347,11 +408,22 @@ class LtSimConfiguration:
             device_key = new_cnfg[f'dev_{i}']
             changed_params = {k: v for k, v in new_cnfg.items() if k.endswith(f'_{i}') and self.base_cnfg_dict[k] != v}
             if changed_params:
-                changed_params_by_device[device_key + f'_{i}'] = changed_params
-                new_cnfg[f'dev_{i}'] = device_key + f'_{i}'
+                changed_params_by_device[device_key.split('_')[0] + f'_{i}'] = changed_params
+                new_cnfg[f'dev_{i}'] = device_key.split('_')[0] + f'_{i}'
             # Update changed params
+        
+        # self.generate_modif_lib(orig_hemt_name=device_key, model_changes=changed_params_by_device)
+        changed_device_models = self.generate_modif_device_models(orig_hemt_name=device_key, model_changes=changed_params_by_device)
+        for block in changed_device_models:
+            # Construct the new file name using the asc file name and the second string after a space in the block
+            device_name = block.splitlines()[0].split()[1]
+            lib_file_path = Path(self.sim_output_folder) / f"{netlist.asc_file_path.stem}_{sim_index}_{device_name}.lib"
+            # Write the modified block to the .lib file
+            with open(lib_file_path, 'w', encoding='utf-8') as lib_file:
+                lib_file.write(block + '\n')
             
-        self.generate_modif_lib(orig_hemt_name=device_key, model_changes=changed_params_by_device)
+            # Add a .lib instruction to the netlist for the newly created .lib file
+            netlist.add_instruction(f".lib {lib_file_path.name}")
 
     def introduce_meas_commands(self, new_cnfg: dict, netlist):
         # Remove existing .meas commands
@@ -362,8 +434,6 @@ class LtSimConfiguration:
             tdrv_r = new_cnfg[f"tdrv_rise_{i}"] 
             T_off  = new_cnfg[f"T_off_{i}"]
 
-            # Current balance measurements
-            t_on_curr_meas = T_sw + tdrv_r + T_on_i / 2  # Midway through on-time of second cycle
             # Power Loss measurements
             delta_t_loss_meas = min(500e-9, T_on_i * 0.025)
             P_on_times  = [T_sw, T_sw + delta_t_loss_meas]
@@ -388,9 +458,9 @@ class LtSimConfiguration:
                 f".meas X{i}_vgs_pk MAX V(G{i},X{i}:hemt_s_noLs) FROM {1e6*Vgs_pk_times[0]:.6}u TO {1e6*Vgs_pk_times[1]:.6}u",
             )
 
-    def prepare_netlist_for_sim(self, new_cnfg: dict, netlist):
+    def prepare_netlist_for_sim(self, new_cnfg: dict, netlist, sim_index: int):
         # Run all necessary steps to prepare netlist for simulation
-        self.reset_and_trim_netlist(new_cnfg=new_cnfg, netlist=netlist)
+        self.reset_and_trim_netlist(new_cnfg=new_cnfg, netlist=netlist, sim_index=sim_index)
         self.update_netlist_params(new_cnfg=new_cnfg, netlist=netlist)
         self.introduce_meas_commands(new_cnfg=new_cnfg, netlist=netlist)
 
@@ -404,7 +474,6 @@ class LtSimConfiguration:
 # for func, val in zip(doo, vals):
 #     for i in range(1, 11):
 #         print(".param ", func(i)," = ", val)
-
 
 if __name__ == "__main__":
     

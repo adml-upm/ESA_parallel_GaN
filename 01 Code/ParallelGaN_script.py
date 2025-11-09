@@ -16,11 +16,7 @@ LTC = SimRunner(output_folder='temp', simulator=None, parallel_sims=16, timeout=
 # sim_path = './02 Simulations/02 ParallelGaN/ParGan_subckt_example.asc'
 sim_path = './02 Simulations/02 ParallelGaN/ParGan_V3.asc'
 netlist = AscEditor(sim_path)
-
-
-
-
-SimConfig = LtSimConfiguration()
+SimConfig = LtSimConfiguration(sim_output_folder=LTC.output_folder)
 SimConfig.N_devices = 4  # Number of parallel devices to simulate
 SimConfig.TOTAL_DRAWN_DEVICES = 10
 
@@ -102,11 +98,11 @@ elif SIM_TYPE == 'perturbation':
     # SimConfig.add_param_perturbation("T_sw_1", perturb_rel=0.1)
 
     # HEMT model perturbations
-    # SimConfig.add_param_perturbation('Vgs_th_1', perturb_rel=0.1)
-    # SimConfig.add_param_perturbation('k_gm_factor_1', perturb_rel=0.1)
-    # SimConfig.add_param_perturbation('Vgs_th_k_corner_1', perturb_rel=0.1)
-    # SimConfig.add_param_perturbation('Rds_on_base_1', perturb_rel=0.1)
-    # SimConfig.add_param_perturbation('gm_Tc_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Vgs_th_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('k_gm_factor_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Vgs_th_k_corner_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('Rds_on_base_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('gm_Tc_1', perturb_rel=0.1)
     SimConfig.add_param_perturbation('Rds_on_Tc_1', perturb_rel=0.1)
     SimConfig.add_param_perturbation('Vgs_th_Tc_1', perturb_rel=0.1)
     SimConfig.add_param_perturbation('Rgate_int_1', perturb_abs=0.1)
@@ -129,15 +125,17 @@ else:
 
 start_time = time.time()
 all_meas_results = {}
-for specific_config, changed_params in SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE):
-    # Reset netlist + trim number of devices
-    SimConfig.prepare_netlist_for_sim(new_cnfg=specific_config, netlist=netlist)
-    sim = LTC.run(netlist)
+for idx, (specific_config, changed_params) in enumerate(SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE)):
+    sim_index = idx + 1
+    # Reset netlist + trim number of devic  es
+    SimConfig.prepare_netlist_for_sim(new_cnfg=specific_config, netlist=netlist, sim_index=sim_index)
+    sim_asc_name = f"{netlist.asc_file_path.stem}_sim_{sim_index}.asc"
+    sim = LTC.run(netlist, run_filename=sim_asc_name)
     # Store the changed parameters for this sim
-    log_name = sim.netlist_file.name.rstrip('.asc')
+    log_name = sim_asc_name.rstrip('.asc')
     all_meas_results[log_name] = {}
     all_meas_results[log_name]['config_changes']= changed_params
-    time.sleep(1.5)  # slight delay to avoid overloading LTSpice
+    # time.sleep(1.5)  # slight delay to avoid overloading LTSpice
 
 # Wait for all the sims launched. A timeout counter from last completed sim keeps track of stalled sims
 LTC.wait_completion()
@@ -190,14 +188,14 @@ elif SIM_TYPE == 'perturbation':
                                    skip_branches=list(range(3, SimConfig.N_devices + 1)),
                                    base_config=base_config_dict,
                                    k_perturb=SimConfig.default_Kperturb,
-                                   save_figs=False)
+                                   save_figs=True)
     
     plot_wfm_from_all_runs(meas_res=all_meas_results,
                            explicit_wfms=[],
                            skip_branches=list(range(3, SimConfig.N_devices + 1)),
                            base_config=base_config_dict,
                            edge='rise',
-                           save_figs=False)
+                           save_figs=True)
 elif SIM_TYPE == 'multiparam':
     raise Exception("multiparam sim not implemented")
 else:
