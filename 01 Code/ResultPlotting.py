@@ -280,21 +280,23 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
         for row, wfm_name in enumerate(suffix_groups[suffix]):
             ax = axes[row, col]
             for sim_name, wfm_time, wfm_data in grouped_waveforms[wfm_name]:
-                ax.plot(np.array(wfm_time) * 1e6, wfm_data, label=f'Sim: {sim_name}')
+                ax.plot(np.array(wfm_time), wfm_data, label=sim_name)
 
-                if edge == 'rise' and base_config is not None:
-                    ti = base_config[f"Vdrive_delay_{col+1}"] + base_config[f"T_sw_{col+1}"]
-                    tf = ti + 100e-9  # 100 ns after rising starts
-                    ax.set_xlim(ti * 1e6, tf * 1e6)
-                elif edge == 'fall':
-                    list_of_key = [f"Vdrive_delay_{col+1}", f"T_sw_{col+1}", f"T_on_{col+1}", f"tdrv_rise_{col+1}"]
-                    ti = sum([base_config[k] for k in list_of_key])
-                    tf = ti + 50e-9  # 100 ns after falling starts
-                    ax.set_xlim(ti * 1e6, tf * 1e6)
-                else:
-                    pass  # Full scale
+            if edge == 'rise' and base_config is not None:
+                ti = base_config[f"Vdrive_delay_{col+1}"] + base_config[f"T_sw_{col+1}"]
+                tf = ti + 100e-9  # 100 ns after rising starts
+                ax.set_xlim(ti, tf)
+            elif edge == 'fall':
+                list_of_key = [f"Vdrive_delay_{col+1}", f"T_sw_{col+1}", f"T_on_{col+1}", f"tdrv_rise_{col+1}"]
+                ti = sum([base_config[k] for k in list_of_key])
+                tf = ti + 50e-9  # 50 ns after falling starts
+                ax.set_xlim(ti, tf)
+            else:
+                pass  # Full scale
                 
-            ax.set(title=wfm_name, xlabel='Time [µs]', ylabel='Amplitude')
+            ax.set(title=wfm_name, xlabel='Time [ns]')
+            ax.set_xticks(ax.get_xticks())  # Keep the same tick positions
+            ax.set_xticklabels([round((tick - ax.get_xticks()[0]) * 1e9, 1) for tick in ax.get_xticks()])  # Convert to ns and subtract offset
             ax.legend(loc='best')
             ax.grid(True)
 
