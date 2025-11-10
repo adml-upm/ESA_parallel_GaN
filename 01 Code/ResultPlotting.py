@@ -253,7 +253,7 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
 
             if wfm_name not in grouped_waveforms:
                 grouped_waveforms[wfm_name] = []
-            grouped_waveforms[wfm_name].append((sim_name, wfm_time, wfm_data))
+            grouped_waveforms[wfm_name].append((sim_name, param_changes, wfm_time, wfm_data))
 
 
     # Filter out waveforms based on skip_branches
@@ -272,51 +272,82 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
 
     # Determine subplot layout
     n_cols, n_rows = len(sorted_suffixes), max(len(suffix_groups[suffix]) for suffix in sorted_suffixes)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), sharex=False, sharey=True)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), sharex=False, sharey=False)
     axes = np.atleast_2d(axes)
 
     # Plot waveforms
     for col, suffix in enumerate(sorted_suffixes):
         for row, wfm_name in enumerate(suffix_groups[suffix]):
             ax = axes[row, col]
-            for sim_name, wfm_time, wfm_data in grouped_waveforms[wfm_name]:
-                ax.plot(np.array(wfm_time), wfm_data, label=sim_name)
-
+            
             if edge == 'rise' and base_config is not None:
                 ti = base_config[f"Vdrive_delay_{col+1}"] + base_config[f"T_sw_{col+1}"]
                 tf = ti + 100e-9  # 100 ns after rising starts
-                ax.set_xlim(ti, tf)
             elif edge == 'fall':
-                list_of_key = [f"Vdrive_delay_{col+1}", f"T_sw_{col+1}", f"T_on_{col+1}", f"tdrv_rise_{col+1}"]
-                ti = sum([base_config[k] for k in list_of_key])
-                tf = ti + 50e-9  # 50 ns after falling starts
-                ax.set_xlim(ti, tf)
+                list_of_key = [f"Vdrive_delay_{col+1}", f"T_sw_{col+1}", f"tdrv_rise_{col+1}"]
+                ti = sum([base_config[k] for k in list_of_key]) + base_config[f"D_on_{col+1}"]*base_config[f"T_sw_{col+1}"]
+                tf = ti + 100e-9  # 100 ns after falling starts
             else:
                 pass  # Full scale
                 
+            y_min, y_max = float('inf'), float('-inf')
+            for sim_name, param_changes, wfm_time, wfm_data in grouped_waveforms[wfm_name]:
+                kv, *_ = param_changes.items()
+                plot_label = f"Sim: {sim_name.split('_')[-1]} {kv[0]}={format_eng(kv[1])}"
+                ax.plot(np.array(wfm_time), wfm_data, label=plot_label)
+                y_min = min(min(np.array(wfm_data)[(np.array(wfm_time) >= ti) & (np.array(wfm_time) <= tf)]), y_min)
+                y_max = max(max(np.array(wfm_data)[(np.array(wfm_time) >= ti) & (np.array(wfm_time) <= tf)]), y_max)
+            ax.set_xlim(ti if ti is not None else None, tf if tf is not None else None)
             ax.set(title=wfm_name, xlabel='Time [ns]')
             ax.set_xticks(ax.get_xticks())  # Keep the same tick positions
             ax.set_xticklabels([round((tick - ax.get_xticks()[0]) * 1e9, 1) for tick in ax.get_xticks()])  # Convert to ns and subtract offset
-            ax.legend(loc='best')
+            
             ax.grid(True)
+            ax.set_ylabel("Volts (V)" if wfm_name.startswith('v_') else "Amps (A)")
+            ax.set_ylim(y_min-0.05*(y_max-y_min), y_max+0.05*(y_max-y_min))
+            _handles, labels = ax.get_legend_handles_labels()
+            if len(labels) <= 10:
+                ax.legend(loc='best')
+            else:
+                # Optionally, hide or skip the legend
+                pass
+
+    
+    # for row, wfm_name in enumerate(suffix_groups[suffix]):
+    #     for col, suffix in enumerate(sorted_suffixes):
+    #         # Collect y-limits for all plots in the same row
+    #         y_limits = [axes[row, col].get_ylim() for col in range(n_cols)]
+    #         y_min, y_max = min(y[0] for y in y_limits), max(y[1] for y in y_limits)
+    #         y_min, y_max = axes[row, col].get_ylim()
+        
+        
 
     # Hide unused subplots
     for row in range(n_rows):
         for col in range(n_cols):
             if col >= len(sorted_suffixes) or row >= len(suffix_groups[sorted_suffixes[col]]):
                 axes[row][col].axis('off')
-
     plt.tight_layout()
-    plt.suptitle(f'Waveforms from {"All" if len(meas_res) > 1 else "Selected"} Simulations', y=1.02)
+
+    # Set overall title: What waveforms are being shown?
+    unique_keys = set('_'.join(key.split('_')[:-1]) for key in grouped_waveforms.keys())
+    if len(unique_keys) < 4:
+        title_wfms = "-".join(unique_keys)
+    else:
+        title_wfms = "Several Waveforms"
+    num_sims = len(meas_res)  # Nº simulations shown    
+    edge_str = f': {edge} edge zoom' if edge else ''
+
+    figure_title = f'{title_wfms} from {num_sims} Simulation{"s" if num_sims != 1 else ""}{edge_str}'
+    plt.suptitle(figure_title, y=1 + 0.05 * n_rows)
 
     if not save_figs:
         plt.show()
     else:
         output_folder = './plots'
         os.makedirs(output_folder, exist_ok=True)
-        for wfm_name in grouped_waveforms.keys():
-            plot_path = os.path.join(output_folder, f'wfm_{wfm_name}_all_runs.png')
-            plt.savefig(plot_path)
+        plot_path = os.path.join(output_folder, f'{figure_title.replace(" ", "_").replace(":", "")}.png')
+        plt.savefig(plot_path)
         plt.close()
 
 def calculate_time_limits_for_plots(meas_res, base_config, edge='rise'):
