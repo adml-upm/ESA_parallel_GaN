@@ -255,7 +255,6 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
                 grouped_waveforms[wfm_name] = []
             grouped_waveforms[wfm_name].append((sim_name, param_changes, wfm_time, wfm_data))
 
-
     # Filter out waveforms based on skip_branches
     if skip_branches:
         grouped_waveforms = {
@@ -310,17 +309,7 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
                 ax.legend(loc='best')
             else:
                 # Optionally, hide or skip the legend
-                pass
-
-    
-    # for row, wfm_name in enumerate(suffix_groups[suffix]):
-    #     for col, suffix in enumerate(sorted_suffixes):
-    #         # Collect y-limits for all plots in the same row
-    #         y_limits = [axes[row, col].get_ylim() for col in range(n_cols)]
-    #         y_min, y_max = min(y[0] for y in y_limits), max(y[1] for y in y_limits)
-    #         y_min, y_max = axes[row, col].get_ylim()
-        
-        
+                pass  
 
     # Hide unused subplots
     for row in range(n_rows):
@@ -337,7 +326,6 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
         title_wfms = "Several Waveforms"
     num_sims = len(meas_res)  # Nº simulations shown    
     edge_str = f': {edge} edge zoom' if edge else ''
-
     figure_title = f'{title_wfms} from {num_sims} Simulation{"s" if num_sims != 1 else ""}{edge_str}'
     plt.suptitle(figure_title, y=1 + 0.05 * n_rows)
 
@@ -349,14 +337,3 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
         plot_path = os.path.join(output_folder, f'{figure_title.replace(" ", "_").replace(":", "")}.png')
         plt.savefig(plot_path)
         plt.close()
-
-def calculate_time_limits_for_plots(meas_res, base_config, edge='rise'):
-    """Calculate appropriate time limits for waveform plots based on base configuration.
-
-    Args:
-        meas_res (dict): Measurement results from simulations.
-        base_config (dict): Base configuration dictionary.
-        edge (str, optional): Edge type to consider ('rise' or 'fall'). Defaults to 'rise'.
-    Returns:
-        tuple: (time_start, time_end) in seconds.
-    """
