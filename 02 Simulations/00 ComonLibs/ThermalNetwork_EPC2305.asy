@@ -9,5 +9,5 @@ PIN 96 -16 RIGHT 8
 PINATTR PinName Tcase
 PINATTR SpiceOrder 2
 PIN 96 16 RIGHT 8
-PINATTR PinName Tref
+PINATTR PinName Tj
 PINATTR SpiceOrder 3

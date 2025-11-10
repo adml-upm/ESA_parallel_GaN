@@ -14,7 +14,7 @@ simulator = r"C:\Users\Alex\AppData\Local\Programs\ADI\LTspice\LTspice.exe"
 LTC = SimRunner(output_folder='temp', simulator=None, parallel_sims=16, timeout=30)
 
 # sim_path = './02 Simulations/02 ParallelGaN/ParGan_subckt_example.asc'
-sim_path = './02 Simulations/02 ParallelGaN/ParGan_V3.asc'
+sim_path = './02 Simulations/02 ParallelGaN/ParGan_V4.asc'
 netlist = AscEditor(sim_path)
 SimConfig = LtSimConfiguration(sim_output_folder=LTC.output_folder)
 SimConfig.N_devices = 4  # Number of parallel devices to simulate
@@ -73,6 +73,20 @@ for i in range(1, SimConfig.N_devices + 1):
 
 SimConfig.base_cnfg_dict = base_config_dict.copy()
 
+# ---------------------------------------------------------------
+# Define waveforms to save
+wfms_to_save = {}
+for i in range(1, SimConfig.N_devices + 1):
+    wfms_to_save.update({
+        f"vg{i}": f'V(G{i})',
+        f"vs{i}": f'V(S{i})',
+        f"vd{i}": f'V(D{i})',
+        f"vTj{i}": f'V(Tj{i})',
+        f"id{i}": f'I(x{i}:L_drain)',
+    })
+    
+
+
 # Define simulation type and parameter variations
 SIM_TYPE = 'perturbation'  # 'sweep', 'perturbation', 'multiparam'
 if SIM_TYPE == 'sweep':
@@ -123,6 +137,7 @@ for idx, (specific_config, changed_params) in enumerate(SimConfig.yield_cnfgs_se
     sim_index = idx + 1
     # Reset netlist + trim number of devic  es
     SimConfig.prepare_netlist_for_sim(new_cnfg=specific_config, netlist=netlist, sim_index=sim_index)
+    SimConfig.define_selective_saving(wfms_to_save=wfms_to_save, netlist=netlist)
     sim_asc_name = f"{netlist.asc_file_path.stem}_sim_{sim_index}.asc"
     sim = LTC.run(netlist, run_filename=sim_asc_name)
     # Store the changed parameters for this sim
@@ -138,23 +153,15 @@ print('Successful/Total Simulations: ' + str(LTC.okSim) + '/' + str(LTC.runno))
 
 for raw, log in LTC:
     raw_data = RawRead(raw)
-    # sim_time1 = [abs(t) for t in list(raw_data.get_trace('time'))]
     sim_time = raw_data.get_axis() # because LTSpice bug flips some time signs (-10ns?) in 2nd order compression
     all_meas_results[log.stem]['waveforms'] = {'time': sim_time}
+
+    extracted_wfms = {k: list(raw_data.get_trace(wfm_name)) for k, wfm_name in wfms_to_save.items()}
     for i in range(1, SimConfig.N_devices + 1):
         all_meas_results[log.stem]['waveforms'][f'i_drain_{i}'] = list(raw_data.get_trace(f'I(x{i}:L_drain)'))
-        vgate = list(raw_data.get_trace(f'V(G{i})'))
-        vsource = list(raw_data.get_trace(f'V(S{i})'))
-        vdrain = list(raw_data.get_trace(f'V(D{i})'))
-        vsource = list(raw_data.get_trace(f'V(S{i})'))
-        all_meas_results[log.stem]['waveforms'][f'v_gs_{i}'] = [vgate[j] - vsource[j] for j in range(len(vgate))]
-        all_meas_results[log.stem]['waveforms'][f'v_ds_{i}'] = [vdrain[j] - vsource[j] for j in range(len(vgate))]
-    
-    # print(f"Trace length is {len(i_drain_sw1_r)} and they match: {i_drain_sw1_r == i_drain_sw1_l}")
-    # # print(raw_data.get_trace_names())
-    # time = list(raw_data.get_trace('time'))
-    # time = [abs(t) for t in time]  # Necessary due to LTSpice bug printing negative time sometimes
-    # print(f"Simulation time is {time[-1]}s, sim length is {len(time)} points")
+        all_meas_results[log.stem]['waveforms'][f'v_gs_{i}'] = [vg-vs for vg, vs in zip(extracted_wfms[f'vg{i}'], extracted_wfms[f'vs{i}'])]
+        all_meas_results[log.stem]['waveforms'][f'v_ds_{i}'] = [vd-vs for vd, vs in zip(extracted_wfms[f'vd{i}'], extracted_wfms[f'vs{i}'])]
+        all_meas_results[log.stem]['waveforms'][f'Tj_{i}'] = extracted_wfms[f'vTj{i}']
     
     # Get the names of the variables that were stepped, and the measurements taken
     log_data = LTSpiceLogReader(log)

@@ -390,6 +390,11 @@ class LtSimConfiguration:
                                                                                             tsw=new_cnfg[f"T_sw_{i}"] * 1e6)
             netlist.set_component_value(f'Vgdrv{i}', driver_cmd)
 
+        # Update Power Loss arb. curr. sources:
+        for i in range(1, self.N_devices + 1):
+            gan_loss_cmd = f"I=V(x{i}:hemt_s_nols)*-I(x{i}:L_common_source)+V(g{i})*I(xg{i}:Lg_minusLcommonsrc)+V(d{i})*I(x{i}:R_drain)"
+            netlist.set_component_value(f'B{i}', gan_loss_cmd)
+
     def reset_and_trim_netlist(self, new_cnfg: dict, netlist, sim_index: int):
         # reset netlist due to removed hemts or changed params
         netlist.reset_netlist()
@@ -447,8 +452,13 @@ class LtSimConfiguration:
             ich_rise_delay = 10e-6
             vch_min = 0.05 * new_cnfg['V_DC']
             ich_fall_delay = 15e-6
+            # Junction temp. measurement window
+            Tj_on_times = [T_sw, T_sw + 0.5e-6]
+            Tj_off_times = [T_sw + T_on_i, T_sw + T_on_i + 0.5e-6]
 
-            loss_expression = f"V(G{i})*Ix(X{i}:U1:gatein)+V(D{i})*Ix(X{i}:U1:drainin)+V(X{i}:hemt_s_noLs)*Ix(X{i}:U1:sourcein)"
+            # loss_expression = f"V(G{i})*Ix(X{i}:U1:gatein)+V(D{i})*Ix(X{i}:U1:drainin)+V(X{i}:hemt_s_noLs)*Ix(X{i}:U1:sourcein)"
+            gan_loss_cmd = f"V(x{i}:hemt_s_nols)*-I(x{i}:L_common_source)+V(g{i})*I(xg{i}:Lg_minusLcommonsrc)+V(d{i})*I(x{i}:R_drain)"
+            loss_expression = gan_loss_cmd
             netlist.add_instructions(
                 f".meas X{i}_rms_cond RMS I(x{i}:L_drain) TRIG I(x{i}:L_drain)={ich_min} TD={1e6*ich_rise_delay}u RISE=1 TARG V(D{i},S{i})={vch_min} TD={1e6*ich_fall_delay}u RISE=1",
                 # f".meas X{i}_cond_current FIND I(X{i}:R_drain) AT {1e6*t_on_curr_meas:.6}u",
@@ -456,6 +466,8 @@ class LtSimConfiguration:
                 f".meas X{i}_E_off INTEG {loss_expression} FROM {1e6*P_off_times[0]:.6}u TO {1e6*P_off_times[1]:.6}u",
                 f".meas X{i}_vds_pk MAX V(D{i},X{i}:hemt_s_noLs) FROM {1e6*Vds_pk_times[0]:.6}u TO {1e6*Vds_pk_times[1]:.6}u",
                 f".meas X{i}_vgs_pk MAX V(G{i},X{i}:hemt_s_noLs) FROM {1e6*Vgs_pk_times[0]:.6}u TO {1e6*Vgs_pk_times[1]:.6}u",
+                f".meas X{i}_MaxTj_on MAX V(Tj{i}) FROM {1e6*Tj_on_times[0]:.6}u TO {1e6*Tj_on_times[1]:.6}u",
+                f".meas X{i}_MaxTj_off MAX V(Tj{i}) FROM {1e6*Tj_off_times[0]:.6}u TO {1e6*Tj_off_times[1]:.6}u",
             )
 
     def prepare_netlist_for_sim(self, new_cnfg: dict, netlist, sim_index: int):
@@ -464,6 +476,13 @@ class LtSimConfiguration:
         self.update_netlist_params(new_cnfg=new_cnfg, netlist=netlist)
         self.introduce_meas_commands(new_cnfg=new_cnfg, netlist=netlist)
 
+    def define_selective_saving(self, wfms_to_save, netlist):
+        # Remove existing .save commands
+        netlist.remove_Xinstruction(search_pattern='.save')
+        save_cmds = []
+        for i in range(1, self.N_devices + 1):
+            save_cmds.append(f".save V(G{i}) V(D{i}) V(S{i}) I(X{i}:R_drain) I(X{i}:L_drain) V(Tj{i}) V(X{i}:hemt_s_nols) I(x{i}:L_common_source) I(xg{i}:Lg_minusLcommonsrc)")
+        netlist.add_instructions(*save_cmds)
 
 # Useful for starting values of sim V3:
 
