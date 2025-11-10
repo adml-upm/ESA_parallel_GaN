@@ -117,12 +117,6 @@ else:
 
 # ---------------------------------------------------------------
 
-
-# netlist.add_instructions(
-#     f".include {os.path.abspath('./02 Simulations/00 ComonLibs/EPCGaNLibrary.lib')}",
-#     f".include {os.path.abspath('./02 Simulations/00 ComonLibs/EPCGaN.asy')}"
-# )
-
 start_time = time.time()
 all_meas_results = {}
 for idx, (specific_config, changed_params) in enumerate(SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE)):
@@ -143,16 +137,18 @@ print('Successful/Total Simulations: ' + str(LTC.okSim) + '/' + str(LTC.runno))
 
 
 for raw, log in LTC:
-    # print("Raw file: %s, Log file: %s" % (raw, log))
     raw_data = RawRead(raw)
-    # Store the extracted waveforms in the results dictionary
-    sim_time = [abs(t) for t in list(raw_data.get_trace('time'))]  # Necessary due to LTSpice bug printing negative time sometimes
+    # sim_time1 = [abs(t) for t in list(raw_data.get_trace('time'))]
+    sim_time = raw_data.get_axis() # because LTSpice bug flips some time signs (-10ns?) in 2nd order compression
     all_meas_results[log.stem]['waveforms'] = {'time': sim_time}
     for i in range(1, SimConfig.N_devices + 1):
         all_meas_results[log.stem]['waveforms'][f'i_drain_{i}'] = list(raw_data.get_trace(f'I(x{i}:L_drain)'))
         vgate = list(raw_data.get_trace(f'V(G{i})'))
         vsource = list(raw_data.get_trace(f'V(S{i})'))
+        vdrain = list(raw_data.get_trace(f'V(D{i})'))
+        vsource = list(raw_data.get_trace(f'V(S{i})'))
         all_meas_results[log.stem]['waveforms'][f'v_gs_{i}'] = [vgate[j] - vsource[j] for j in range(len(vgate))]
+        all_meas_results[log.stem]['waveforms'][f'v_ds_{i}'] = [vdrain[j] - vsource[j] for j in range(len(vgate))]
     
     # print(f"Trace length is {len(i_drain_sw1_r)} and they match: {i_drain_sw1_r == i_drain_sw1_l}")
     # # print(raw_data.get_trace_names())
@@ -195,7 +191,13 @@ elif SIM_TYPE == 'perturbation':
                            skip_branches=list(range(3, SimConfig.N_devices + 1)),
                            base_config=base_config_dict,
                            edge='rise',
-                           save_figs=True)
+                           save_figs=False)
+    plot_wfm_from_all_runs(meas_res=all_meas_results,
+                           explicit_wfms=[],
+                           skip_branches=list(range(3, SimConfig.N_devices + 1)),
+                           base_config=base_config_dict,
+                           edge='fall',
+                           save_figs=False)
 elif SIM_TYPE == 'multiparam':
     raise Exception("multiparam sim not implemented")
 else:
