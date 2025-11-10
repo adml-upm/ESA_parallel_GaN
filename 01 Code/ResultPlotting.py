@@ -205,7 +205,7 @@ def generate_perturbation_heat_map(params_to_plot, meas_res, skip_branches=None,
     print(variation_df.head)
 
     # Plot seaborn heatmap
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(0.8 * variation_df.shape[1], 0.4 * variation_df.shape[0]))
     sns.heatmap(
         variation_df,
         annot=True, fmt=".2f", cmap="coolwarm", center=0,
@@ -220,10 +220,10 @@ def generate_perturbation_heat_map(params_to_plot, meas_res, skip_branches=None,
     if not save_figs:
         plt.show()
     else:
-        output_folder = os.path.dirname(os.path.dirname(__file__))
-        # os.makedirs(output_folder, exist_ok=True)
-
-        plt.savefig(os.path.join(output_folder, 'plots', 'perturbation_heat_map.png'))
+        output_folder = './plots'
+        os.makedirs(output_folder, exist_ok=True)
+        plot_path = os.path.join(output_folder, 'perturbation_heat_map.png')
+        plt.savefig(plot_path)
         plt.close()
 
 def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_config=None, edge=None, save_figs=True):
@@ -271,7 +271,7 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
 
     # Determine subplot layout
     n_cols, n_rows = len(sorted_suffixes), max(len(suffix_groups[suffix]) for suffix in sorted_suffixes)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), sharex=False, sharey=False)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), sharex=True, sharey=False)
     axes = np.atleast_2d(axes)
 
     # Plot waveforms
@@ -297,7 +297,10 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
                 y_min = min(min(np.array(wfm_data)[(np.array(wfm_time) >= ti) & (np.array(wfm_time) <= tf)]), y_min)
                 y_max = max(max(np.array(wfm_data)[(np.array(wfm_time) >= ti) & (np.array(wfm_time) <= tf)]), y_max)
             ax.set_xlim(ti if ti is not None else None, tf if tf is not None else None)
-            ax.set(title=wfm_name, xlabel='Time [ns]')
+            if row == n_rows - 1:
+                ax.set(title=wfm_name, xlabel='Time [ns]')  # Only set xlabel for bottom row
+            else:
+                ax.set(title=wfm_name)
             ax.set_xticks(ax.get_xticks())  # Keep the same tick positions
             ax.set_xticklabels([round((tick - ax.get_xticks()[0]) * 1e9, 1) for tick in ax.get_xticks()])  # Convert to ns and subtract offset
             
