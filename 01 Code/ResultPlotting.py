@@ -237,6 +237,11 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
         time_scale (list, optional): Time scale [start, end] in seconds for x-axis. Defaults to [] (full scale).
         save_figs (bool, optional): Whether to save figures or show them. Defaults to True.
     """
+    labeltexts = {
+        'i': 'Current [A]',
+        'v': 'Voltage [V]',
+        't': 'Junction Temperature [C]',
+    }
     # Collect all waveforms and group them by common keys
     grouped_waveforms = {}
     for sim_name, sim_meas in meas_res.items():
@@ -271,7 +276,7 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
 
     # Determine subplot layout
     n_cols, n_rows = len(sorted_suffixes), max(len(suffix_groups[suffix]) for suffix in sorted_suffixes)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), sharex=True, sharey=False)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols + 1.5, 4 * n_rows), sharex=True, sharey=False)
     axes = np.atleast_2d(axes)
 
     # Plot waveforms
@@ -305,22 +310,28 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
             ax.set_xticklabels([round((tick - ax.get_xticks()[0]) * 1e9, 1) for tick in ax.get_xticks()])  # Convert to ns and subtract offset
             
             ax.grid(True)
-            ax.set_ylabel("Volts (V)" if wfm_name.startswith('v_') else "Amps (A)")
+            ax.set_ylabel(labeltexts[wfm_name[0].lower()])
             ax.set_ylim(y_min-0.05*(y_max-y_min), y_max+0.05*(y_max-y_min))
             _handles, labels = ax.get_legend_handles_labels()
-            if len(labels) <= 10:
+            if len(labels) <= 5:
                 ax.legend(loc='best')
             else:
-                # Optionally, hide or skip the legend
-                pass  
+                # Place no individual legends to avoid clutter
+                pass
 
     # Hide unused subplots
     for row in range(n_rows):
         for col in range(n_cols):
             if col >= len(sorted_suffixes) or row >= len(suffix_groups[sorted_suffixes[col]]):
                 axes[row][col].axis('off')
-    plt.tight_layout()
 
+    # Global legend on the right, adjust subplot area to fit
+    # Shrink subplots to make space for legend and suptitle
+    plt.subplots_adjust(right=0.78, top=0.95)  # Reserve space for legend and suptitle
+    handles, labels = fig.axes[0].get_legend_handles_labels()
+    # Place legend outside the plot area, centered in the reserved space
+    fig.legend(handles, labels, loc='center left', bbox_to_anchor=(0.80, 0.5), borderaxespad=0.)
+    
     # Set overall title: What waveforms are being shown?
     unique_keys = set('_'.join(key.split('_')[:-1]) for key in grouped_waveforms.keys())
     if len(unique_keys) < 4:
@@ -330,7 +341,10 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
     num_sims = len(meas_res)  # Nº simulations shown    
     edge_str = f': {edge} edge zoom' if edge else ''
     figure_title = f'{title_wfms} from {num_sims} Simulation{"s" if num_sims != 1 else ""}{edge_str}'
-    plt.suptitle(figure_title, y=1 + 0.05 * n_rows)
+    fig.suptitle(figure_title, y=0.97)  # Place suptitle just above the subplots
+
+    # Only call tight_layout once, and leave space for legend and suptitle
+    plt.tight_layout(rect=[0, 0, 0.78, 0.95])
 
     if not save_figs:
         plt.show()
