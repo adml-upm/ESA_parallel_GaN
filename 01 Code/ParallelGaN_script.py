@@ -54,9 +54,9 @@ for i in range(1, SimConfig.N_devices + 1):
     # Parasitic PCB params
     base_config_dict[f"R_pcb_branch_{i}"] = 1e-3
     # Driving circuit params
-    base_config_dict[f"Lg_uncommon_{i}"] = 0.5e-9
+    base_config_dict[f"Lg_uncommon_{i}"] = 2.5e-9
     base_config_dict[f"L_common_source_{i}"] = 200e-12
-    base_config_dict[f"R_driver_{i}"] = 2
+    base_config_dict[f"R_driver_{i}"] = 1e-3
     base_config_dict[f"R_g_{i}"] = 1
     # Gate Driver params 
     base_config_dict[f"Vdrv_off_{i}"] = 0
@@ -64,7 +64,8 @@ for i in range(1, SimConfig.N_devices + 1):
     base_config_dict[f"Vdrive_delay_{i}"] = 1e-9
     base_config_dict[f"tdrv_rise_{i}"] = 1e-9
     base_config_dict[f"tdrv_fall_{i}"] = 1e-9
-    base_config_dict[f"T_sw_{i}"] = 1 / 100e3
+    fsw = 100e3
+    base_config_dict[f"T_sw_{i}"] = 1 / fsw
     base_config_dict[f"D_on_{i}"] = 0.5
 
     # HEMT model params
@@ -84,14 +85,15 @@ for i in range(1, SimConfig.N_devices + 1):
         f"vTj{i}": f'V(Tj{i})',
         f"id{i}": f'I(x{i}:L_drain)',
     })
-    
 
+# ---------------------------------------------------------------
 
 # Define simulation type and parameter variations
-SIM_TYPE = 'perturbation'  # 'sweep', 'perturbation', 'multiparam'
+SIM_TYPE = 'sweep'  # 'sweep', 'perturbation', 'multiparam'
 if SIM_TYPE == 'sweep':
-    SimConfig.add_param_sweep_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_sweep_points)
-    SimConfig.add_param_sweep_with_range('L_drain_1', [500e-12, 50e-9], m_points=m_sweep_points, log_space=True)
+    # SimConfig.add_param_sweep_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_sweep_points)
+    # SimConfig.add_param_sweep_with_range('L_drain_1', [500e-12, 50e-9], m_points=m_sweep_points, log_space=True)
+    SimConfig.add_param_sweep_with_range('Vgs_th_1', [1.5, 2.4], m_points=11, log_space=False)
     # SimConfig.add_param_sweep_with_range('Vdrv_on_1', [4.5, 5.5], m_points=m_points)
 elif SIM_TYPE == 'perturbation':    
     SimConfig.default_Kperturb = 0.1  # Modify standard relative perturbation amount (p.u.)
@@ -113,7 +115,7 @@ elif SIM_TYPE == 'perturbation':
 
     # HEMT model perturbations
     SimConfig.add_param_perturbation('Vgs_th_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('k_gm_factor_1', perturb_rel=0.1)
+    SimConfig.add_param_perturbation('k_gm_factor_1', perturb_rel=0.5)
     SimConfig.add_param_perturbation('Vgs_th_k_corner_1', perturb_rel=0.1)
     SimConfig.add_param_perturbation('Rds_on_base_1', perturb_rel=0.1)
     SimConfig.add_param_perturbation('gm_Tc_1', perturb_rel=0.1)

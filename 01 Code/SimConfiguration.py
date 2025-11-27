@@ -60,11 +60,15 @@ class LtSimConfiguration:
             raise ValueError("type must be 'standard' or 'spice'")
 
     def add_param_sweep_with_range(self, param_name: str, range_vals: list, m_points: int=5, log_space:bool =False):
+        if self._is_epc_param(param_name, type='standard'):
+            stripped_param_name = param_name.rsplit('_', 1)
+            param_name = '_'.join([self.epc_model_param_mapping[stripped_param_name[0]], stripped_param_name[-1]])
+
         if param_name in self.base_cnfg_dict:
             if not log_space:  # Default is linear space
-                self.config_ranges[param_name] = np.linspace(range_vals[0], range_vals[1], m_points)
+                self.config_ranges[param_name] = [float(x) for x in np.linspace(range_vals[0], range_vals[1], m_points)]
             else:
-                self.config_ranges[param_name] = np.geomspace(range_vals[0], range_vals[1], m_points)
+                self.config_ranges[param_name] = [float(x) for x in np.geomspace(range_vals[0], range_vals[1], m_points)]
             self.params_to_plot.append(param_name)
         else:
             raise ValueError(f"Parameter {param_name} not in base configuration dictionary.")
