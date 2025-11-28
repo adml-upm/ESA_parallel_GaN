@@ -39,7 +39,8 @@ hemt_base_config = SimConfig.get_hemt_parameters_from_lib()
 
 base_config_dict = {
     'V_DC': V_DC,
-    'I_DC': I_DC
+    'I_DC': I_DC,
+    'N_devices': SimConfig.N_devices
 }
 
 for i in range(1, SimConfig.N_devices + 1):

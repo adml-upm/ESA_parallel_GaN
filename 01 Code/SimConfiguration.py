@@ -464,7 +464,7 @@ class LtSimConfiguration:
             gan_loss_cmd = f"V(x{i}:hemt_s_nols)*-I(x{i}:L_common_source)+V(g{i})*I(xg{i}:Lg_minusLcommonsrc)+V(d{i})*I(x{i}:R_drain)"
             loss_expression = gan_loss_cmd
             netlist.add_instructions(
-                f".meas X{i}_rms_cond RMS I(x{i}:L_drain) TRIG I(x{i}:L_drain)={ich_min} TD={1e6*ich_rise_delay}u RISE=1 TARG V(D{i},S{i})={vch_min} TD={1e6*ich_fall_delay}u RISE=1",
+                f".meas X{i}_rms_i RMS I(x{i}:L_drain) TRIG I(x{i}:L_drain)={ich_min} TD={1e6*ich_rise_delay}u RISE=1 TARG V(D{i},S{i})={vch_min} TD={1e6*ich_fall_delay}u RISE=1",
                 # f".meas X{i}_cond_current FIND I(X{i}:R_drain) AT {1e6*t_on_curr_meas:.6}u",
                 f".meas X{i}_E_on INTEG {loss_expression} FROM {1e6*P_on_times[0]:.6}u TO {1e6*P_on_times[1]:.6}u",
                 f".meas X{i}_E_off INTEG {loss_expression} FROM {1e6*P_off_times[0]:.6}u TO {1e6*P_off_times[1]:.6}u",
@@ -472,6 +472,7 @@ class LtSimConfiguration:
                 f".meas X{i}_vgs_pk MAX V(G{i},X{i}:hemt_s_noLs) FROM {1e6*Vgs_pk_times[0]:.6}u TO {1e6*Vgs_pk_times[1]:.6}u",
                 f".meas X{i}_MaxTj_on MAX V(Tj{i}) FROM {1e6*Tj_on_times[0]:.6}u TO {1e6*Tj_on_times[1]:.6}u",
                 f".meas X{i}_MaxTj_off MAX V(Tj{i}) FROM {1e6*Tj_off_times[0]:.6}u TO {1e6*Tj_off_times[1]:.6}u",
+                f".meas X{i}_cond_ratio PARAM X{i}_rms_i/(I_DC/N_devices)",
             )
 
     def prepare_netlist_for_sim(self, new_cnfg: dict, netlist, sim_index: int):

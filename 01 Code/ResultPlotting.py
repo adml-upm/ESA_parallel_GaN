@@ -9,6 +9,13 @@ import pandas as pd
 import seaborn as sns
 from SimConfiguration import LtSimConfiguration
 
+labeltexts = {
+        'i': 'Current [A]',
+        'v': 'Voltage [V]',
+        'v_lv': 'Low Voltage [V]',
+        't': 'Temperature [C]',
+    }
+
 def detect_spacing(values, tol=1e-12):
     arr = np.array(values, dtype=float)
     diffs = np.diff(arr)
@@ -43,7 +50,7 @@ def generate_sweep_plots(params_to_plot, meas_res, skip_branches=None, save_figs
                         meas_dict[k] = []
                     meas_dict[k].append(v)
 
-        # Sort by r_drain_vals for plotting
+        # Sort by x_axis_vals for plotting
         sorted_indices = np.argsort(x_axis_vals)
         x_axis_vals = np.array(x_axis_vals)[sorted_indices]
         meas_keys = list(meas_dict.keys())
@@ -51,14 +58,16 @@ def generate_sweep_plots(params_to_plot, meas_res, skip_branches=None, save_figs
 
         # Plot measurements with the same unit on the same vertically stacked subplot
         unit_map = {
-            'current': ('A', 1),
-            '_current': ('A', 1),
-            '_v': ('V', 1),
-            '_vds': ('V', 1),
-            '_vgs': ('V', 1),
+            'current': (labeltexts['i'], 1),
+            'cond': (labeltexts['i'], 1),
+            # '_v': (labeltexts['v'], 1),
+            '_vds': (labeltexts['v'], 1),
+            '_vgs': (labeltexts['v_lv'], 1),
             '_e_': ('nJ', 1e9),
             '_e_on': ('nJ', 1e9),
             '_e_off': ('nJ', 1e9),
+            'ratio': ('adim.', 1),
+            'tj': (labeltexts['t'], 1),
         }
 
         # Group keys by unit and coefficient
@@ -237,11 +246,6 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
         time_scale (list, optional): Time scale [start, end] in seconds for x-axis. Defaults to [] (full scale).
         save_figs (bool, optional): Whether to save figures or show them. Defaults to True.
     """
-    labeltexts = {
-        'i': 'Current [A]',
-        'v': 'Voltage [V]',
-        't': 'Junction Temperature [C]',
-    }
     # Collect all waveforms and group them by common keys
     grouped_waveforms = {}
     for sim_name, sim_meas in meas_res.items():
