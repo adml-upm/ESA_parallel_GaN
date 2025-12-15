@@ -21,7 +21,7 @@ class LtSimConfiguration:
         self.config_ranges = {}
         self.perturb_params = {}
         self.params_to_plot = []
-        self.default_Kperturb = 0.05  # standard 5% perturbation magnitude
+        self.default_k_perturb = 0.05  # standard 5% perturbation magnitude
 
         # HEMT library params
         # project root is parent of "01 Code" -> Path(__file__).resolve().parent.parent
@@ -82,16 +82,16 @@ class LtSimConfiguration:
         if param_name in self.base_cnfg_dict:
             if perturb_abs is not None and perturb_rel is not None:
                 raise ValueError("Use either magnitude or percentage, not both")
-            elif perturb_abs is None and perturb_rel is not None:
-                perturb_abs = perturb_rel * abs(self.base_cnfg_dict[param_name])
-            elif perturb_abs is not None and perturb_rel is None:
-                pass
-            else:
-                perturb_abs = self.default_Kperturb * abs(self.base_cnfg_dict[param_name])            
+            elif perturb_abs is None and perturb_rel is not None:  # relative perturbation
+                perturbation = perturb_rel * abs(self.base_cnfg_dict[param_name])
+            elif perturb_abs is not None and perturb_rel is None:  # absolute perturbation
+                perturbation = perturb_abs
+            else:  # default perturbation
+                perturbation = self.default_k_perturb * abs(self.base_cnfg_dict[param_name])            
         else:
             raise ValueError(f"Parameter {param_name} not in base configuration dictionary.")
         
-        self.perturb_params[param_name] = perturb_abs
+        self.perturb_params[param_name] = perturbation
         self.params_to_plot.append(param_name)
         
     def perturb_all_params(self):
@@ -101,7 +101,9 @@ class LtSimConfiguration:
 
     def yield_cnfgs_sequentially(self, iter_type: str='sweep'):
         """Yields configurations one at a time based on the specified iteration type.
-         iter_type: 'sweep' for single parameter sweeps, 'perturbation' for single parameter perturbations,
+         iter_type: 
+         'sweep' for single parameter sweeps, 
+         'perturbation' for single parameter perturbations,
          'multiparam' for multi-parameter sweeps.
         returns: Yields a tuple of (configuration_dict, changed_params_dict) for each configuration."""
         if self.base_cnfg_dict != {}:

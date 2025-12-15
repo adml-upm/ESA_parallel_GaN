@@ -46,6 +46,7 @@ base_config_dict = {
 for i in range(1, SimConfig.N_devices + 1):
     # HEMT device param
     base_config_dict[f'dev_{i}'] = "EPC2305"  # "use default names from lib"
+    base_config_dict[f"Q_Tj_{i}"] = 25
     
     # HEMT cell params
     base_config_dict[f"R_drain_{i}"] = 1e-3
@@ -94,10 +95,11 @@ SIM_TYPE = 'sweep'  # 'sweep', 'perturbation', 'multiparam'
 if SIM_TYPE == 'sweep':
     # SimConfig.add_param_sweep_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_sweep_points)
     # SimConfig.add_param_sweep_with_range('L_drain_1', [500e-12, 50e-9], m_points=m_sweep_points, log_space=True)
-    SimConfig.add_param_sweep_with_range('Vgs_th_1', [1.5, 2.4], m_points=11, log_space=False)
+    # SimConfig.add_param_sweep_with_range('Vgs_th_1', [1.5, 2.4], m_points=11, log_space=False)
+    SimConfig.add_param_sweep_with_range('Q_Tj_1', [25, 150], m_points=11, log_space=False)
     # SimConfig.add_param_sweep_with_range('Vdrv_on_1', [4.5, 5.5], m_points=m_points)
 elif SIM_TYPE == 'perturbation':    
-    SimConfig.default_Kperturb = 0.1  # Modify standard relative perturbation amount (p.u.)
+    SimConfig.default_k_perturb = 0.1  # Modify standard relative perturbation amount (p.u.)
 
     # Circuit parameter perturbations
     # SimConfig.add_param_perturbation("R_drain_1")
@@ -147,7 +149,6 @@ for idx, (specific_config, changed_params) in enumerate(SimConfig.yield_cnfgs_se
     log_name = sim_asc_name.rstrip('.asc')
     all_meas_results[log_name] = {}
     all_meas_results[log_name]['config_changes']= changed_params
-    # time.sleep(1.5)  # slight delay to avoid overloading LTSpice
 
 # Wait for all the sims launched. A timeout counter from last completed sim keeps track of stalled sims
 LTC.wait_completion()
@@ -193,7 +194,7 @@ elif SIM_TYPE == 'perturbation':
                                    meas_res=all_meas_results,
                                    skip_branches=list(range(3, SimConfig.N_devices + 1)),
                                    base_config=base_config_dict,
-                                   k_perturb=SimConfig.default_Kperturb,
+                                   k_perturb=SimConfig.default_k_perturb,
                                    save_figs=True)
     
     plot_wfm_from_all_runs(meas_res=all_meas_results,
