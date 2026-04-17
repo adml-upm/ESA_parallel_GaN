@@ -28,7 +28,7 @@ def detect_spacing(values, tol=1e-12):
         return "linear" 
 
 
-def generate_sweep_plots(params_to_plot, meas_res, skip_branches=None, save_figs=True):
+def generate_sweep_plots(params_to_plot, meas_res, explicit_wfms=[], skip_branches=None, save_figs=True):
     # Remove first sim of all (base case) if present
     meas_res.pop(sorted(meas_res.keys())[0], None)
 
@@ -54,6 +54,9 @@ def generate_sweep_plots(params_to_plot, meas_res, skip_branches=None, save_figs
         sorted_indices = np.argsort(x_axis_vals)
         x_axis_vals = np.array(x_axis_vals)[sorted_indices]
         meas_keys = list(meas_dict.keys())
+        if not not explicit_wfms:  # checks if empty list
+            meas_keys = [k for k in meas_keys if '_'.join(k.split('_')[1:]) in explicit_wfms]
+            
         meas_matrix = np.array([np.array(meas_dict[k])[sorted_indices] for k in meas_keys]).T
 
         # Plot measurements with the same unit on the same vertically stacked subplot
@@ -101,7 +104,7 @@ def generate_sweep_plots(params_to_plot, meas_res, skip_branches=None, save_figs
         # Format x-axis ticks to engineering notation - do not break up this secti
         axes[-1].set_xlabel(f'{param_to_plot}')
         x_ticks = axes[-1].get_xticks()
-        x_axis_units = 'Ω' if param_to_plot.startswith('R_') else 'H' if param_to_plot.startswith('L_') else ''
+        x_axis_units = 'Ω'   if param_to_plot.startswith('R_') else 'H' if param_to_plot.startswith('L_') else ''
         x_tick_labels = [format_eng(val)+x_axis_units for val in x_ticks]
         axes[-1].set_xticklabels(x_tick_labels)
         
@@ -243,7 +246,7 @@ def plot_wfm_from_all_runs(meas_res, explicit_wfms=[], skip_branches=None, base_
         meas_res (dict): Measurement results from simulations.
         explicit_wfms (list, optional): List of specific waveform names to plot. Defaults to [] (plot all).
         skip_branches (list, optional): List of branch identifiers to skip in plotting. Defaults to None.
-        time_scale (list, optional): Time scale [start, end] in seconds for x-axis. Defaults to [] (full scale).
+        edge (str, optional): 'rise' or 'fall' to define time window for plotting. Defaults to full sim length.
         save_figs (bool, optional): Whether to save figures or show them. Defaults to True.
     """
     # Collect all waveforms and group them by common keys

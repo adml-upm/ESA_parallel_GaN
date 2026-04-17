@@ -85,7 +85,9 @@ for i in range(1, SimConfig.N_devices + 1):
         f"vs{i}": f'V(S{i})',
         f"vd{i}": f'V(D{i})',
         f"vTj{i}": f'V(Tj{i})',
-        f"id{i}": f'I(x{i}:L_drain)',
+        f"I(X{i}_L_drain)": f'I(X{i}:L_drain)',
+        f"V(X{i}_hemt_s_nols)": f'V(X{i}:hemt_s_nols)',
+        f"id{i}": f'I(X{i}:L_drain)',
     })
 
 # ---------------------------------------------------------------
@@ -95,8 +97,8 @@ SIM_TYPE = 'sweep'  # 'sweep', 'perturbation', 'multiparam'
 if SIM_TYPE == 'sweep':
     # SimConfig.add_param_sweep_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_sweep_points)
     # SimConfig.add_param_sweep_with_range('L_drain_1', [500e-12, 50e-9], m_points=m_sweep_points, log_space=True)
-    # SimConfig.add_param_sweep_with_range('Vgs_th_1', [1.5, 2.4], m_points=11, log_space=False)
-    SimConfig.add_param_sweep_with_range('Q_Tj_1', [25, 150], m_points=11, log_space=False)
+    SimConfig.add_param_sweep_with_range('Vgs_th_1', [1.852-0.44, 1.852+0.44], m_points=10, log_space=False)
+    # SimConfig.add_param_sweep_with_range('Q_Tj_1', [25, 150], m_points=11, log_space=False)
     # SimConfig.add_param_sweep_with_range('Vdrv_on_1', [4.5, 5.5], m_points=m_points)
 elif SIM_TYPE == 'perturbation':    
     SimConfig.default_k_perturb = 0.1  # Modify standard relative perturbation amount (p.u.)
@@ -187,6 +189,18 @@ print(f"Loop execution time: {end_time - start_time:.2f} seconds")
 if SIM_TYPE == 'sweep':
     generate_sweep_plots(params_to_plot=SimConfig.params_to_plot, meas_res=all_meas_results,
                          skip_branches=['x3', 'x4'], save_figs=False)
+    plot_wfm_from_all_runs(meas_res=all_meas_results,
+                           explicit_wfms=['time', 'i_drain', 'v_gs'],
+                           skip_branches=[],
+                           base_config=base_config_dict,
+                           edge='rise',
+                           save_figs=False)
+    plot_wfm_from_all_runs(meas_res=all_meas_results,
+                           explicit_wfms=['time', 'i_drain', 'v_gs'],
+                           skip_branches=[],
+                           base_config=base_config_dict,
+                           edge='fall',
+                           save_figs=False)
 elif SIM_TYPE == 'perturbation':
     # generate_perturbation_plots(params_to_plot=SimConfig.params_to_plot, meas_res=all_meas_results,
     #                      skip_branches=['x3', 'x4'], base_config=base_config_dict, save_figs=True)

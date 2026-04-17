@@ -486,10 +486,14 @@ class LtSimConfiguration:
     def define_selective_saving(self, wfms_to_save, netlist):
         # Remove existing .save commands
         netlist.remove_Xinstruction(search_pattern='.save')
-        save_cmds = []
-        for i in range(1, self.N_devices + 1):
-            save_cmds.append(f".save V(G{i}) V(D{i}) V(S{i}) I(X{i}:R_drain) I(X{i}:L_drain) V(Tj{i}) V(X{i}:hemt_s_nols) I(x{i}:L_common_source) I(xg{i}:Lg_minusLcommonsrc)")
-        netlist.add_instructions(*save_cmds)
+        # save_cmds = []
+        # for i in range(1, self.N_devices + 1):
+        #     save_cmds.append(f".save V(G{i}) V(D{i}) V(S{i}) I(X{i}:R_drain) I(X{i}:L_drain) V(Tj{i}) V(X{i}:hemt_s_nols) I(x{i}:L_common_source) I(xg{i}:Lg_minusLcommonsrc)")
+        if wfms_to_save:
+            save_cmds = [f".save {v}" for v in wfms_to_save.values()]
+            netlist.add_instructions(*save_cmds)
+        else:
+            netlist.add_instructions("*No waveforms specified for saving. All .save commands removed.")
 
 # Useful for starting values of sim V3:
 
