@@ -1,0 +1,15 @@
+../Core/Src/main.c:122:5:main	72	static
+../Core/Src/main.c:220:6:SystemClock_Config	88	static
+../Core/Src/main.c:267:13:MX_ADC2_Init	40	static
+../Core/Src/main.c:339:13:MX_ADC5_Init	40	static
+../Core/Src/main.c:411:13:MX_TIM1_Init	120	static
+../Core/Src/main.c:493:13:MX_USART2_UART_Init	8	static
+../Core/Src/main.c:539:13:MX_DMA_Init	16	static
+../Core/Src/main.c:561:13:MX_GPIO_Init	16	static
+../Core/Src/main.c:578:6:PWM_SetOutputState	16	static
+../Core/Src/main.c:594:6:PWM_SetDutyCycle	24	static
+../Core/Src/main.c:610:6:PWM_SetFrequency	40	static
+../Core/Src/main.c:634:6:PWM_SetDeadTime_ns	32	static
+../Core/Src/main.c:667:6:Parse_SerialCommand	48	static
+../Core/Src/main.c:767:6:UART_CheckForIncomingCommands	16	static
+../Core/Src/main.c:807:6:Error_Handler	4	static,ignoring_inline_asm
