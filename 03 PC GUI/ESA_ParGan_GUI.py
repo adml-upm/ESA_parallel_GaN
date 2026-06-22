@@ -1,5 +1,9 @@
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
+from tkinter.scrolledtext import ScrolledText
+
+from serial_comm import SerialManager
 
 
 class STM32GUI:
@@ -7,6 +11,18 @@ class STM32GUI:
         self.root = root
         self.root.title("STM32 Communication GUI")
         self.root.geometry("800x600")
+
+        # Serial communication state
+        self.serial_manager = SerialManager(
+            on_telemetry_callback=self.on_data_received,
+            on_status_callback=self._on_serial_status_changed,
+            on_raw_line_callback=self._on_serial_raw_line
+        )
+        self.com_port_var = tk.StringVar(value="")
+        self.connection_button_text = tk.StringVar(value="Connect")
+        self.connection_status_var = tk.StringVar(value="Disconnected")
+        self.monitor_visible = False
+        self.monitor_button_text = tk.StringVar(value="Show RX Monitor")
         
         # Variable to track which section is selected (DPT or BO)
         self.selected_part = tk.IntVar(value=2)
@@ -19,18 +35,168 @@ class STM32GUI:
         self.BO_section_status_text = tk.StringVar(value="STOPPED")
         
         # Create main layout
+        self.create_serial_section()
+        self.create_serial_monitor_section()
         self.create_TM_section()
         self.create_DPT_BO_sections()
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         
         # Bind the radio button change to update greyed out state
         self.selected_part.trace("w", self._on_part_selection_change)
         self.DPT_section_mode.trace("w", self._on_DPT_section_mode_change)
+
+    # ==================== Serial Section: COM Port Controls ====================
+    def create_serial_section(self):
+        """Create COM port controls: scan, select, connect/disconnect."""
+        serial_frame = ttk.LabelFrame(self.root, text="Serial Connection", padding=10)
+        serial_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+        row = ttk.Frame(serial_frame)
+        row.pack(fill=tk.X)
+
+        ttk.Label(row, text="COM Port:").pack(side=tk.LEFT, padx=(0, 8))
+
+        self.combobox_ports = ttk.Combobox(
+            row,
+            textvariable=self.com_port_var,
+            state="readonly",
+            width=16
+        )
+        self.combobox_ports.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.button_scan_ports = ttk.Button(
+            row,
+            text="Scan",
+            command=self.scan_com_ports
+        )
+        self.button_scan_ports.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.button_connect = ttk.Button(
+            row,
+            textvariable=self.connection_button_text,
+            command=self.toggle_com_connection
+        )
+        self.button_connect.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.button_toggle_monitor = ttk.Button(
+            row,
+            textvariable=self.monitor_button_text,
+            command=self.toggle_serial_monitor
+        )
+        self.button_toggle_monitor.pack(side=tk.LEFT, padx=(0, 12))
+
+        self.label_connection_status = ttk.Label(
+            row,
+            textvariable=self.connection_status_var,
+            foreground="gray30"
+        )
+        self.label_connection_status.pack(side=tk.LEFT)
+
+        self.scan_com_ports()
+
+    def create_serial_monitor_section(self):
+        """Create a raw serial monitor to inspect incoming lines."""
+        self.serial_monitor_frame = ttk.LabelFrame(self.root, text="Raw Serial Monitor (RX)", padding=10)
+        if self.monitor_visible:
+            self.serial_monitor_frame.pack(fill=tk.BOTH, padx=10, pady=(8, 0))
+
+        button_row = ttk.Frame(self.serial_monitor_frame)
+        button_row.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Button(button_row, text="Clear", command=self._clear_serial_log).pack(side=tk.LEFT)
+
+        self.serial_log_text = ScrolledText(self.serial_monitor_frame, height=8, wrap=tk.NONE)
+        self.serial_log_text.pack(fill=tk.BOTH, expand=True)
+        self.serial_log_text.configure(state=tk.DISABLED)
+
+    def toggle_serial_monitor(self):
+        """Hide or show the raw serial monitor frame."""
+        if self.monitor_visible:
+            self.serial_monitor_frame.pack_forget()
+            self.monitor_visible = False
+            self.monitor_button_text.set("Show RX Monitor")
+        else:
+            self.serial_monitor_frame.pack(fill=tk.BOTH, padx=10, pady=(8, 0), before=self.TM_section_frame)
+            self.monitor_visible = True
+            self.monitor_button_text.set("Hide RX Monitor")
+
+    def scan_com_ports(self):
+        """Scan available serial ports and update COM selector."""
+        ports = SerialManager.list_ports()
+        self.combobox_ports["values"] = ports
+
+        if ports:
+            if self.com_port_var.get() not in ports:
+                self.com_port_var.set(ports[0])
+            self.connection_status_var.set("Ports found")
+        else:
+            self.com_port_var.set("")
+            self.connection_status_var.set("No COM ports found")
+
+    def toggle_com_connection(self):
+        """Connect or disconnect serial communication."""
+        if self.serial_manager.is_connected:
+            self.serial_manager.disconnect()
+            self._set_connection_ui(False)
+            return
+
+        selected_port = self.com_port_var.get().strip()
+        if not selected_port:
+            messagebox.showwarning("No COM Port", "Please scan and select a COM port first.")
+            return
+
+        connected, message = self.serial_manager.connect(selected_port)
+        if connected:
+            self._set_connection_ui(True)
+            self.connection_status_var.set(message)
+        else:
+            self._set_connection_ui(False)
+            self.connection_status_var.set(message)
+            messagebox.showerror("Connection Failed", message)
+
+    def _set_connection_ui(self, connected):
+        """Update controls for connected/disconnected serial state."""
+        if connected:
+            self.connection_button_text.set("Disconnect")
+            self.button_scan_ports.config(state=tk.DISABLED)
+            self.combobox_ports.config(state="disabled")
+        else:
+            self.connection_button_text.set("Connect")
+            self.button_scan_ports.config(state=tk.NORMAL)
+            self.combobox_ports.config(state="readonly")
+
+    def _on_serial_status_changed(self, status_text):
+        """Thread-safe status update callback from serial layer."""
+        self.root.after(0, self.connection_status_var.set, status_text)
+
+    def _on_serial_raw_line(self, line_text):
+        """Thread-safe callback to show each raw serial line."""
+        self.root.after(0, self._append_serial_log, line_text)
+
+    def _append_serial_log(self, line_text):
+        """Append one line to the serial monitor and autoscroll."""
+        self.serial_log_text.configure(state=tk.NORMAL)
+        self.serial_log_text.insert(tk.END, line_text + "\n")
+        self.serial_log_text.see(tk.END)
+        self.serial_log_text.configure(state=tk.DISABLED)
+
+    def _clear_serial_log(self):
+        """Clear raw serial monitor text area."""
+        self.serial_log_text.configure(state=tk.NORMAL)
+        self.serial_log_text.delete("1.0", tk.END)
+        self.serial_log_text.configure(state=tk.DISABLED)
+
+    def _on_close(self):
+        """Gracefully close serial connection before exiting."""
+        self.serial_manager.disconnect()
+        self.root.destroy()
     
     # ==================== TM_section: Display Fields ====================
     def create_TM_section(self):
         """Create TM_section with display fields (non-editable) in two rows"""
-        TM_section_frame = ttk.LabelFrame(self.root, text="STM32 Reported Telemetries:", padding=10)
-        TM_section_frame.pack(fill=tk.X, padx=10, pady=10)
+        self.TM_section_frame = ttk.LabelFrame(self.root, text="STM32 Reported Telemetries:", padding=10)
+        self.TM_section_frame.pack(fill=tk.X, padx=10, pady=10)
         
         # Store display field references for later updates
         self.display_fields = {}
@@ -52,14 +218,14 @@ class STM32GUI:
         ]
         
         # Create first row
-        row1_frame = ttk.Frame(TM_section_frame)
+        row1_frame = ttk.Frame(self.TM_section_frame)
         row1_frame.pack(fill=tk.X, pady=(0, 10))
         
         for label_text, default_value in row1_fields:
             self._create_display_field(row1_frame, label_text, default_value)
         
         # Create second row
-        row2_frame = ttk.Frame(TM_section_frame)
+        row2_frame = ttk.Frame(self.TM_section_frame)
         row2_frame.pack(fill=tk.X)
         
         for label_text, default_value in row2_fields:
@@ -188,9 +354,28 @@ class STM32GUI:
         
         # BO_section: Input fields
         self.BO_section_inputs = {}
-        BO_section_fields = ["fsw (kHz)", "duty (%.0)", "T dt on (ticks)", "T dt off (ticks)"]
-        for field_name in BO_section_fields:
-            self._create_input_field(self.BO_section_frame, field_name, "BO_section")
+        self._create_input_field(
+            self.BO_section_frame,
+            "fsw (kHz)",
+            "BO_section",
+            inline_button_text="Send Freq",
+            inline_button_command=self.send_pwm_frequency_callback
+        )
+        self._create_input_field(
+            self.BO_section_frame,
+            "duty (%.0)",
+            "BO_section",
+            inline_button_text="Send Duty",
+            inline_button_command=self.send_pwm_duty_callback
+        )
+        self._create_input_field(
+            self.BO_section_frame,
+            "T dt on (ns)",
+            "BO_section",
+            inline_button_text="Send DT",
+            inline_button_command=self.send_pwm_deadtime_callback
+        )
+        self._create_input_field(self.BO_section_frame, "T dt off (ns)", "BO_section")
 
         ttk.Separator(self.BO_section_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
@@ -219,7 +404,14 @@ class STM32GUI:
         # Initial state: DPT_section is enabled, BO_section is disabled
         self._update_part_states()
     
-    def _create_input_field(self, parent, field_name, part_id):
+    def _create_input_field(
+        self,
+        parent,
+        field_name,
+        part_id,
+        inline_button_text=None,
+        inline_button_command=None
+    ):
         """Helper to create an input field with label"""
         field_container = ttk.Frame(parent)
         field_container.pack(fill=tk.X, pady=5)
@@ -232,6 +424,13 @@ class STM32GUI:
         input_var = tk.StringVar()
         input_entry = ttk.Entry(field_container, textvariable=input_var)
         input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        if inline_button_text and inline_button_command:
+            ttk.Button(
+                field_container,
+                text=inline_button_text,
+                command=inline_button_command
+            ).pack(side=tk.LEFT, padx=(8, 0))
         
         # Store reference
         if part_id == "DPT_section":
@@ -306,22 +505,91 @@ class STM32GUI:
     
     # ==================== Communication Callbacks ====================
     # These are empty callback functions for STM32 communication
+
+    def _send_serial_command(self, command_text):
+        """Send one command to STM32 and report if not connected."""
+        if not self.serial_manager.is_connected:
+            self.connection_status_var.set("Not connected")
+            return False
+
+        success = self.serial_manager.send_line(command_text)
+        if not success:
+            self.connection_status_var.set("Send failed")
+            return False
+
+        self.connection_status_var.set(f"TX: {command_text}")
+        return True
+
+    def _get_inputs_snapshot(self, inputs_dict):
+        """Read current values from one input dictionary."""
+        snapshot = {}
+        for key, (value_var, _entry) in inputs_dict.items():
+            snapshot[key] = value_var.get().strip()
+        return snapshot
     
     def DPT_mode_change_callback(self):
         """Callback when Part 2 is selected - implement STM32 communication here"""
-        pass
+        selected_mode = self.DPT_section_mode.get()
+        self._send_serial_command(f"MODE:DPT:{selected_mode}")
     
     def BO_mode_change_callback(self):
         """Callback when Part 3 is selected - implement STM32 communication here"""
-        pass
+        self._send_serial_command("MODE:BO:active")
 
     def on_BO_section_enable_changed(self):
         """Callback when BO_section enable checkbox changes - implement STM32 communication here"""
-        pass
+        enabled = 1 if self.BO_section_enable_var.get() else 0
+        self._send_serial_command(f"BO:ENABLE:{enabled}")
 
     def DPT_singleshot_callback(self):
         """Callback when 'Run Single Shot' button is pressed - implement STM32 communication here"""
-        pass
+        self._send_serial_command("DPT:SINGLE_SHOT")
+
+    def send_pwm_duty_callback(self):
+        """Send PWM duty command in percent: PWM:DUTY:<0..100>."""
+        duty_text = self.BO_section_inputs["duty (%.0)"][0].get().strip()
+        try:
+            duty_value = float(duty_text)
+        except ValueError:
+            messagebox.showwarning("Invalid Duty", "Duty must be a numeric value between 0 and 100.")
+            return
+
+        if duty_value < 0.0 or duty_value > 100.0:
+            messagebox.showwarning("Invalid Duty", "Duty must be between 0 and 100.")
+            return
+
+        self._send_serial_command(f"PWM:DUTY:{duty_value:g}")
+
+    def send_pwm_frequency_callback(self):
+        """Send PWM frequency command in Hz: PWM:FREQ:<Hz>."""
+        freq_khz_text = self.BO_section_inputs["fsw (khz)"][0].get().strip()
+        try:
+            freq_khz = float(freq_khz_text)
+        except ValueError:
+            messagebox.showwarning("Invalid Frequency", "Switching frequency must be numeric (kHz).")
+            return
+
+        if freq_khz <= 0.0:
+            messagebox.showwarning("Invalid Frequency", "Switching frequency must be greater than 0.")
+            return
+
+        freq_hz = int(round(freq_khz * 1000.0))
+        self._send_serial_command(f"PWM:FREQ:{freq_hz}")
+
+    def send_pwm_deadtime_callback(self):
+        """Send PWM deadtime command in ns: PWM:DT:<ns>."""
+        deadtime_text = self.BO_section_inputs["t dt on (ns)"][0].get().strip()
+        try:
+            deadtime_ns = int(float(deadtime_text))
+        except ValueError:
+            messagebox.showwarning("Invalid Deadtime", "Deadtime must be numeric (ns).")
+            return
+
+        if deadtime_ns < 0:
+            messagebox.showwarning("Invalid Deadtime", "Deadtime must be >= 0 ns.")
+            return
+
+        self._send_serial_command(f"PWM:DT:{deadtime_ns}")
 
     def on_data_received(self, telemetry):
         """Update display fields with data received from STM32.
@@ -329,6 +597,11 @@ class STM32GUI:
         Expected keys: 'v in (v)', 'i in (a)', 'v out (v)', 'i out (a)',
         'p in (w)', 'p out (w)', 'eff (%)', 'mode'.
         """
+        # Serial reads run in a background thread, so push UI updates to main thread.
+        self.root.after(0, self._apply_telemetry_update, telemetry)
+
+    def _apply_telemetry_update(self, telemetry):
+        """Apply telemetry values to display fields in the Tk main thread."""
         for key, value in telemetry.items():
             normalized_key = key.lower()
             if normalized_key in self.display_fields:
@@ -336,11 +609,36 @@ class STM32GUI:
     
     def send_DPT_settings(self):
         """Send Part 2 data to STM32 - implement STM32 communication here"""
-        pass
+        inputs = self._get_inputs_snapshot(self.DPT_section_inputs)
+        period_ms = self.DPT_section_period_var.get().strip()
+        periodic_enabled = 1 if self.DPT_section_periodic_checkbox_var.get() else 0
+
+        parts = [
+            "DPT:SET",
+            f"ton1_us={inputs.get('turn on time 1 (us)', '')}",
+            f"toff_us={inputs.get('turn off time (us)', '')}",
+            f"ton2_us={inputs.get('turn on time 2 (us)', '')}",
+            f"cooldown_us={inputs.get('cooldown time (us)', '')}",
+            f"mode={self.DPT_section_mode.get()}",
+            f"period_ms={period_ms}",
+            f"periodic_enable={periodic_enabled}",
+        ]
+        self._send_serial_command(";".join(parts))
     
     def send_BO_settings(self):
         """Send Part 3 data to STM32 - implement STM32 communication here"""
-        pass
+        inputs = self._get_inputs_snapshot(self.BO_section_inputs)
+        enabled = 1 if self.BO_section_enable_var.get() else 0
+
+        parts = [
+            "BO:SET",
+            f"fsw_khz={inputs.get('fsw (khz)', '')}",
+            f"duty_pct={inputs.get('duty (%.0)', '')}",
+            f"tdt_on_ns={inputs.get('t dt on (ns)', '')}",
+            f"tdt_off_ns={inputs.get('t dt off (ns)', '')}",
+            f"enable={enabled}",
+        ]
+        self._send_serial_command(";".join(parts))
 
 
 def main():
