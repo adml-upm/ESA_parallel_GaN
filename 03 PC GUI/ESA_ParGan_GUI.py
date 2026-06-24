@@ -1,3 +1,4 @@
+import math
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
@@ -277,6 +278,7 @@ class STM32GUI:
         
         # DPT_section: Input fields
         self.DPT_section_inputs = {}
+        self.DPT_section_action_buttons = []
         DPT_section_fields = ["Turn on time 1 (us)", "Turn off time (us)", "Turn on time 2 (us)", "Cooldown time (us)"]
         for field_name in DPT_section_fields:
             self._create_input_field(self.DPT_section_frame, field_name, "DPT_section")
@@ -289,12 +291,13 @@ class STM32GUI:
         mode_label.pack(anchor=tk.W, pady=(0, 5))
         
         # Periodic radio button
-        ttk.Radiobutton(
+        self.DPT_section_periodic_radio = ttk.Radiobutton(
             self.DPT_section_frame,
             text="Periodic",
             variable=self.DPT_section_mode,
             value="periodic"
-        ).pack(anchor=tk.W)
+        )
+        self.DPT_section_periodic_radio.pack(anchor=tk.W)
         
         # Periodic options container
         self.DPT_section_periodic_frame = ttk.Frame(self.DPT_section_frame)
@@ -306,34 +309,38 @@ class STM32GUI:
         
         ttk.Label(periodic_input_container, text="Period (ms):").pack(side=tk.LEFT, padx=(0, 10))
         self.DPT_section_period_var = tk.StringVar()
-        ttk.Entry(periodic_input_container, textvariable=self.DPT_section_period_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.DPT_section_period_entry = ttk.Entry(periodic_input_container, textvariable=self.DPT_section_period_var)
+        self.DPT_section_period_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         # Periodic checkbox
         self.DPT_section_periodic_checkbox_var = tk.BooleanVar()
-        ttk.Checkbutton(
+        self.DPT_section_periodic_checkbox = ttk.Checkbutton(
             self.DPT_section_periodic_frame,
             text="Enable periodic operation",
             variable=self.DPT_section_periodic_checkbox_var
-        ).pack(anchor=tk.W)
+        )
+        self.DPT_section_periodic_checkbox.pack(anchor=tk.W)
         
         # Single shot radio button
-        ttk.Radiobutton(
+        self.DPT_section_singleshot_radio = ttk.Radiobutton(
             self.DPT_section_frame,
             text="Single Shot",
             variable=self.DPT_section_mode,
             value="single_shot"
-        ).pack(anchor=tk.W, pady=(10, 0))
+        )
+        self.DPT_section_singleshot_radio.pack(anchor=tk.W, pady=(10, 0))
         
         # Single shot options container
         self.DPT_section_singleshot_frame = ttk.Frame(self.DPT_section_frame)
         self.DPT_section_singleshot_frame.pack(fill=tk.X, padx=(20, 0), pady=5)
         
         # Single shot button
-        ttk.Button(
+        self.DPT_section_singleshot_button = ttk.Button(
             self.DPT_section_singleshot_frame,
             text="Run Single Shot",
             command=self.DPT_singleshot_callback
-        ).pack(fill=tk.X)
+        )
+        self.DPT_section_singleshot_button.pack(fill=tk.X)
         
         # Initial visibility
         self._update_DPT_section_mode_visibility()
@@ -354,10 +361,12 @@ class STM32GUI:
         
         # BO_section: Input fields
         self.BO_section_inputs = {}
+        self.BO_section_action_buttons = []
         self._create_input_field(
             self.BO_section_frame,
             "fsw (kHz)",
             "BO_section",
+            default_value="100.0",
             inline_button_text="Send Freq",
             inline_button_command=self.send_pwm_frequency_callback
         )
@@ -365,6 +374,7 @@ class STM32GUI:
             self.BO_section_frame,
             "duty (%.0)",
             "BO_section",
+            default_value="50.0",
             inline_button_text="Send Duty",
             inline_button_command=self.send_pwm_duty_callback
         )
@@ -372,10 +382,29 @@ class STM32GUI:
             self.BO_section_frame,
             "T dt on (ns)",
             "BO_section",
+            default_value="53",
             inline_button_text="Send DT",
             inline_button_command=self.send_pwm_deadtime_callback
         )
         self._create_input_field(self.BO_section_frame, "T dt off (ns)", "BO_section")
+
+        # Show quantized timer representation for both deadtime fields.
+        self.BO_section_dt_on_info_var = tk.StringVar(value="")
+        self.BO_section_dt_off_info_var = tk.StringVar(value="")
+        ttk.Label(
+            self.BO_section_frame,
+            textvariable=self.BO_section_dt_on_info_var,
+            foreground="gray35"
+        ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 4))
+        ttk.Label(
+            self.BO_section_frame,
+            textvariable=self.BO_section_dt_off_info_var,
+            foreground="gray35"
+        ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 2))
+
+        # STM32 currently supports one deadtime value only.
+        # Mirror upper deadtime to lower field and keep lower field read-only.
+        self._bind_BO_section_deadtime_fields()
 
         ttk.Separator(self.BO_section_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
@@ -409,6 +438,7 @@ class STM32GUI:
         parent,
         field_name,
         part_id,
+        default_value="",
         inline_button_text=None,
         inline_button_command=None
     ):
@@ -421,16 +451,21 @@ class STM32GUI:
         label.pack(side=tk.LEFT, padx=(0, 10))
         
         # Input field
-        input_var = tk.StringVar()
+        input_var = tk.StringVar(value=default_value)
         input_entry = ttk.Entry(field_container, textvariable=input_var)
         input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         if inline_button_text and inline_button_command:
-            ttk.Button(
+            inline_button = ttk.Button(
                 field_container,
                 text=inline_button_text,
                 command=inline_button_command
-            ).pack(side=tk.LEFT, padx=(8, 0))
+            )
+            inline_button.pack(side=tk.LEFT, padx=(8, 0))
+            if part_id == "DPT_section":
+                self.DPT_section_action_buttons.append(inline_button)
+            else:
+                self.BO_section_action_buttons.append(inline_button)
         
         # Store reference
         if part_id == "DPT_section":
@@ -464,16 +499,39 @@ class STM32GUI:
     
     def _enable_part(self, frame, inputs_dict):
         """Enable a section and its input fields"""
-        for input_var, input_entry in inputs_dict.values():
-            input_entry.config(state=tk.NORMAL)
+        for field_name, (input_var, input_entry) in inputs_dict.items():
+            if frame == self.BO_section_frame and field_name == "t dt off (ns)":
+                input_entry.config(state=tk.DISABLED)
+            else:
+                input_entry.config(state=tk.NORMAL)
+        if frame == self.DPT_section_frame:
+            self.DPT_section_periodic_radio.config(state=tk.NORMAL)
+            self.DPT_section_singleshot_radio.config(state=tk.NORMAL)
+            self.DPT_section_period_entry.config(state=tk.NORMAL)
+            self.DPT_section_periodic_checkbox.config(state=tk.NORMAL)
+            self.DPT_section_singleshot_button.config(state=tk.NORMAL)
+            for button in self.DPT_section_action_buttons:
+                button.config(state=tk.NORMAL)
         if frame == self.BO_section_frame:
+            for button in self.BO_section_action_buttons:
+                button.config(state=tk.NORMAL)
             self.BO_section_enable_checkbox.config(state=tk.NORMAL)
     
     def _disable_part(self, frame, inputs_dict):
         """Disable and grey out a section and its input fields"""
         for input_var, input_entry in inputs_dict.values():
             input_entry.config(state=tk.DISABLED)
+        if frame == self.DPT_section_frame:
+            self.DPT_section_periodic_radio.config(state=tk.DISABLED)
+            self.DPT_section_singleshot_radio.config(state=tk.DISABLED)
+            self.DPT_section_period_entry.config(state=tk.DISABLED)
+            self.DPT_section_periodic_checkbox.config(state=tk.DISABLED)
+            self.DPT_section_singleshot_button.config(state=tk.DISABLED)
+            for button in self.DPT_section_action_buttons:
+                button.config(state=tk.DISABLED)
         if frame == self.BO_section_frame:
+            for button in self.BO_section_action_buttons:
+                button.config(state=tk.DISABLED)
             self.BO_section_enable_checkbox.config(state=tk.DISABLED)
 
     def _on_BO_section_enable_toggled(self):
@@ -502,6 +560,40 @@ class STM32GUI:
         else:
             self.DPT_section_periodic_frame.pack_forget()
             self.DPT_section_singleshot_frame.pack(fill=tk.X, padx=(20, 0), pady=5)
+
+    def _bind_BO_section_deadtime_fields(self):
+        """Mirror T dt on value into T dt off and keep T dt off disabled."""
+        dt_on_var, _ = self.BO_section_inputs["t dt on (ns)"]
+        dt_off_var, dt_off_entry = self.BO_section_inputs["t dt off (ns)"]
+
+        def _mirror_deadtime(*_args):
+            requested_text = dt_on_var.get().strip()
+            dt_off_var.set(requested_text)
+            quantized_info = self._format_deadtime_quantization_info(requested_text)
+            self.BO_section_dt_on_info_var.set(quantized_info)
+            self.BO_section_dt_off_info_var.set(quantized_info)
+
+        dt_on_var.trace_add("write", _mirror_deadtime)
+        _mirror_deadtime()
+        dt_off_entry.config(state=tk.DISABLED)
+
+    def _format_deadtime_quantization_info(self, requested_text):
+        """Format deadtime timer quantization as '<ticks>clkcycles/<time>ns'."""
+        if requested_text == "":
+            return ""
+
+        try:
+            requested_ns = float(requested_text)
+        except ValueError:
+            return "Invalid value"
+
+        if requested_ns < 0.0:
+            return "Invalid value"
+
+        timer_clk_hz = 170e6
+        ticks = int(math.ceil(requested_ns * timer_clk_hz * 1e-9))
+        resulting_ns = (ticks / timer_clk_hz) * 1e9
+        return f"Deadtime: {ticks} CLK_cycles / {resulting_ns:.1f}ns"
     
     # ==================== Communication Callbacks ====================
     # These are empty callback functions for STM32 communication
