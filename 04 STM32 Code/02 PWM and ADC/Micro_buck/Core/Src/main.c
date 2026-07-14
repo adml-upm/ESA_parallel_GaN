@@ -63,10 +63,10 @@ UART_HandleTypeDef huart2;
 volatile uint16_t adc2_buffer[ADC2_BUF_LEN];
 volatile uint16_t adc5_buffer[ADC5_BUF_LEN];
 
-static const float Vin_rdiv_factor = (50.0f + 1.65f) / 1.65f;  # Resistive divider
-static const float Iin_rs_factor   = 1.0f / (0.001f/2.0f * 8.2f * 10.0f);  #1/(Rs*k_amc*k_oa)
-static const float Vo_rdiv_factor  = (50.0f + 2.7f) / 2.7f;  # Resistive divider
-static const float Io_rs_factor    = 1.0f / (0.001f/2.0f * 8.2f * 17.0f);  #1/(Rs*k_amc*k_oa)
+static const float Vin_rdiv_factor = (50.0f + 1.65f) / 1.65f;  // Resistive divider
+static const float Iin_rs_factor   = 1.0f / (0.001f/2.0f * 8.2f * 10.0f);  // 1/(Rs*k_amc*k_oa)
+static const float Vo_rdiv_factor  = (50.0f + 2.7f) / 2.7f;  // Resistive divider
+static const float Io_rs_factor    = 1.0f / (0.001f/2.0f * 8.2f * 17.0f);  // 1/(Rs*k_amc*k_oa)
 
 volatile float Vin_V = 0.0f;
 volatile float Vout_V = 0.0f;
