@@ -7,10 +7,7 @@ from SimConfiguration import LtSimConfiguration
 from ResultPlotting import generate_sweep_plots, generate_perturbation_barplots, generate_perturbation_heat_map, plot_wfm_from_all_runs
    
 
-# Force another simulatior
-simulator = r"C:\Users\Alex\AppData\Local\Programs\ADI\LTspice\LTspice.exe"
-
-# select spice model
+# simulator=None lets PyLTSpice auto-detect the LTspice install
 LTC = SimRunner(output_folder='temp', simulator=None, parallel_sims=16, timeout=30)
 
 # sim_path = './02 Simulations/02 ParallelGaN/ParGan_subckt_example.asc'

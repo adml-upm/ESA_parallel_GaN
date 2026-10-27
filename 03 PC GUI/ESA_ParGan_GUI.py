@@ -278,10 +278,22 @@ class STM32GUI:
         
         # DPT_section: Input fields
         self.DPT_section_inputs = {}
+        self.DPT_section_entries = {}
+        self.DPT_section_timing_info_vars = {}
         self.DPT_section_action_buttons = []
-        DPT_section_fields = ["Turn on time 1 (us)", "Turn off time (us)", "Turn on time 2 (us)", "Cooldown time (us)"]
+        DPT_section_fields = ["Turn on time 1 (us)", "Turn off time (us)", "Turn on time 2 (us)"]
         for field_name in DPT_section_fields:
             self._create_input_field(self.DPT_section_frame, field_name, "DPT_section")
+
+        # Show quantized STM32 implementation time for each DPT parameter.
+        for field_name in DPT_section_fields:
+            info_var = tk.StringVar(value="")
+            self.DPT_section_timing_info_vars[field_name.lower()] = info_var
+            ttk.Label(
+                self.DPT_section_frame,
+                textvariable=info_var,
+                foreground="gray35"
+            ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 2))
         
         # DPT_section: Separator
         ttk.Separator(self.DPT_section_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
@@ -317,7 +329,8 @@ class STM32GUI:
         self.DPT_section_periodic_checkbox = ttk.Checkbutton(
             self.DPT_section_periodic_frame,
             text="Enable periodic operation",
-            variable=self.DPT_section_periodic_checkbox_var
+            variable=self.DPT_section_periodic_checkbox_var,
+            command=self._on_DPT_periodic_enable_changed
         )
         self.DPT_section_periodic_checkbox.pack(anchor=tk.W)
         
@@ -341,6 +354,18 @@ class STM32GUI:
             command=self.DPT_singleshot_callback
         )
         self.DPT_section_singleshot_button.pack(fill=tk.X)
+
+        # Send full DPT configuration explicitly.
+        self.DPT_section_send_button = ttk.Button(
+            self.DPT_section_frame,
+            text="Send DPT Settings",
+            command=self.send_DPT_settings
+        )
+        self.DPT_section_send_button.pack(fill=tk.X, pady=(8, 0))
+        self.DPT_section_action_buttons.append(self.DPT_section_send_button)
+
+        self._bind_DPT_timing_fields()
+        self._bind_DPT_section_controls()
         
         # Initial visibility
         self._update_DPT_section_mode_visibility()
@@ -470,6 +495,7 @@ class STM32GUI:
         # Store reference
         if part_id == "DPT_section":
             self.DPT_section_inputs[field_name.lower()] = (input_var, input_entry)
+            self.DPT_section_entries[field_name.lower()] = input_entry
         else:
             self.BO_section_inputs[field_name.lower()] = (input_var, input_entry)
     
@@ -477,7 +503,7 @@ class STM32GUI:
     def _on_DPT_section_selected(self):
         """Callback when DPT_section radio button is selected"""
         self._on_part_selection_change()
-        self.DPT_mode_change_callback()  # User callback
+        self._send_serial_command("MODE:DPT:active")
     
     def _on_BO_section_selected(self):
         """Callback when BO_section radio button is selected"""
@@ -551,6 +577,7 @@ class STM32GUI:
     def _on_DPT_section_mode_change(self, *args):
         """Update DPT_section UI when operation mode changes"""
         self._update_DPT_section_mode_visibility()
+        self.DPT_mode_change_callback()
     
     def _update_DPT_section_mode_visibility(self):
         """Show/hide periodic and single shot options based on selection"""
@@ -594,6 +621,56 @@ class STM32GUI:
         ticks = int(math.ceil(requested_ns * timer_clk_hz * 1e-9))
         resulting_ns = (ticks / timer_clk_hz) * 1e9
         return f"Deadtime: {ticks} CLK_cycles / {resulting_ns:.1f}ns"
+
+    def _bind_DPT_section_controls(self):
+        """Bind DPT entries so Enter/focus-out sends updated DPT settings."""
+        # for _field_name, (_var, entry) in self.DPT_section_inputs.items():
+            # entry.bind("<Return>", self._on_DPT_input_commit)
+            # entry.bind("<FocusOut>", self._on_DPT_input_commit)
+
+        # self.DPT_section_period_entry.bind("<Return>", self._on_DPT_input_commit)
+        # self.DPT_section_period_entry.bind("<FocusOut>", self._on_DPT_input_commit)
+
+    def _on_DPT_input_commit(self, _event=None):
+        """Send DPT settings when user commits an entry value."""
+        # self.send_DPT_settings()
+
+    def _on_DPT_periodic_enable_changed(self):
+        """Send DPT settings when periodic enable checkbox changes."""
+        self.send_DPT_settings()
+
+    def _bind_DPT_timing_fields(self):
+        """Bind DPT timing fields to show quantized implementation at 170 MHz."""
+        for field_name, (value_var, _entry) in self.DPT_section_inputs.items():
+            if field_name not in self.DPT_section_timing_info_vars:
+                continue
+
+            def _update_info(*_args, key=field_name, source_var=value_var):
+                requested_text = source_var.get().strip()
+                self.DPT_section_timing_info_vars[key].set(
+                    " ".join(key.split(" ")[0:2]) + ": " + self._format_dpt_quantization_info(requested_text)
+                )
+
+            value_var.trace_add("write", _update_info)
+            _update_info()
+
+    def _format_dpt_quantization_info(self, requested_text):
+        """Show the quantized DPT time implemented by STM32 timer ticks at 170 MHz."""
+        if requested_text == "":
+            return "0 ticks -> 0.000000 us"
+
+        try:
+            requested_us = float(requested_text)
+        except ValueError:
+            return "invalid value"
+
+        if requested_us < 0.0:
+            return "invalid value"
+
+        # Formula: int(T * 170e6 / 1e6) / 170e6, with T in microseconds.
+        ticks = int(requested_us * 170.0)
+        implemented_us = ticks / 170.0
+        return f"{ticks} ticks -> {implemented_us:.6f} us"
     
     # ==================== Communication Callbacks ====================
     # These are empty callback functions for STM32 communication
@@ -620,9 +697,9 @@ class STM32GUI:
         return snapshot
     
     def DPT_mode_change_callback(self):
-        """Callback when Part 2 is selected - implement STM32 communication here"""
-        selected_mode = self.DPT_section_mode.get()
-        self._send_serial_command(f"MODE:DPT:{selected_mode}")
+        """Switch MCU to DPT mode and push detailed DPT settings."""
+        self._send_serial_command("MODE:DPT:active")
+        self.send_DPT_settings()
     
     def BO_mode_change_callback(self):
         """Callback when Part 3 is selected - implement STM32 communication here"""
@@ -635,6 +712,7 @@ class STM32GUI:
 
     def DPT_singleshot_callback(self):
         """Callback when 'Run Single Shot' button is pressed - implement STM32 communication here"""
+        self.send_DPT_settings()
         self._send_serial_command("DPT:SINGLE_SHOT")
 
     def send_pwm_duty_callback(self):
@@ -705,14 +783,21 @@ class STM32GUI:
         period_ms = self.DPT_section_period_var.get().strip()
         periodic_enabled = 1 if self.DPT_section_periodic_checkbox_var.get() else 0
 
+        def _num_or_zero(val_str):
+            return val_str if val_str != '' else "0"
+
+        ton1_text = _num_or_zero(inputs.get('turn on time 1 (us)', ''))
+        toff_text = _num_or_zero(inputs.get('turn off time (us)', ''))
+        ton2_text = _num_or_zero(inputs.get('turn on time 2 (us)', ''))
+        period_ms_text = _num_or_zero(period_ms)
+
         parts = [
             "DPT:SET",
-            f"ton1_us={inputs.get('turn on time 1 (us)', '')}",
-            f"toff_us={inputs.get('turn off time (us)', '')}",
-            f"ton2_us={inputs.get('turn on time 2 (us)', '')}",
-            f"cooldown_us={inputs.get('cooldown time (us)', '')}",
+            f"ton1_us={ton1_text}",
+            f"toff_us={toff_text}",
+            f"ton2_us={ton2_text}",
             f"mode={self.DPT_section_mode.get()}",
-            f"period_ms={period_ms}",
+            f"period_ms={period_ms_text}",
             f"periodic_enable={periodic_enabled}",
         ]
         self._send_serial_command(";".join(parts))
