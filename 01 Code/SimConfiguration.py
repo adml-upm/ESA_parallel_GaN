@@ -483,14 +483,25 @@ class LtSimConfiguration:
         self.update_netlist_params(new_cnfg=new_cnfg, netlist=netlist)
         self.introduce_meas_commands(new_cnfg=new_cnfg, netlist=netlist)
 
+    def meas_required_traces(self):
+        """Traces used by the .meas commands of introduce_meas_commands. With .save active, LTspice
+        only keeps saved quantities and aborts the transient if a .meas references an unsaved one."""
+        traces = []
+        for i in range(1, self.N_devices + 1):
+            traces += [f"V(G{i})", f"V(D{i})", f"V(S{i})", f"V(Tj{i})", f"V(X{i}:hemt_s_nols)",
+                       f"I(X{i}:L_drain)", f"I(X{i}:R_drain)", f"I(X{i}:L_common_source)",
+                       f"I(XG{i}:Lg_minusLcommonsrc)"]
+        return traces
+
     def define_selective_saving(self, wfms_to_save, netlist):
         # Remove existing .save commands
         netlist.remove_Xinstruction(search_pattern='.save')
-        # save_cmds = []
-        # for i in range(1, self.N_devices + 1):
-        #     save_cmds.append(f".save V(G{i}) V(D{i}) V(S{i}) I(X{i}:R_drain) I(X{i}:L_drain) V(Tj{i}) V(X{i}:hemt_s_nols) I(x{i}:L_common_source) I(xg{i}:Lg_minusLcommonsrc)")
         if wfms_to_save:
-            save_cmds = [f".save {v}" for v in wfms_to_save.values()]
+            # Always add the traces the .meas commands need (case-insensitive dedupe)
+            requested = list(wfms_to_save.values())
+            requested_lower = {v.lower() for v in requested}
+            requested += [t for t in self.meas_required_traces() if t.lower() not in requested_lower]
+            save_cmds = [f".save {v}" for v in requested]
             netlist.add_instructions(*save_cmds)
         else:
             netlist.add_instructions("*No waveforms specified for saving. All .save commands removed.")
