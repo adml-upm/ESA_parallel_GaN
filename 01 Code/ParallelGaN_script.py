@@ -1,226 +1,93 @@
-from PyLTSpice import SimRunner
-from PyLTSpice import AscEditor
-from PyLTSpice import RawRead
-from PyLTSpice.log.ltsteps import LTSpiceLogReader
-import time
-from SimConfiguration import LtSimConfiguration
-from ResultPlotting import generate_sweep_plots, generate_perturbation_barplots, generate_perturbation_heat_map, plot_wfm_from_all_runs
-   
+"""Script version of the SimGUI flow: edit the settings below and run.
+The base config and the run itself come from SimWorkflow, so defaults live in one place
+(the JSON files in configs/, or SimWorkflow.build_default_base_config). Works from any CWD.
+"""
+import copy
 
-# simulator=None lets PyLTSpice auto-detect the LTspice install
-LTC = SimRunner(output_folder='temp', simulator=None, parallel_sims=16, timeout=30)
-
-# sim_path = './02 Simulations/02 ParallelGaN/ParGan_subckt_example.asc'
-sim_path = './02 Simulations/02 ParallelGaN/ParGan_V4.asc'
-netlist = AscEditor(sim_path)
-SimConfig = LtSimConfiguration(sim_output_folder=LTC.output_folder)
-SimConfig.N_devices = 4  # Number of parallel devices to simulate
-SimConfig.TOTAL_DRAWN_DEVICES = 10
-
-if  SimConfig.N_devices > SimConfig.TOTAL_DRAWN_DEVICES:
-    raise ValueError("N_devices exceeds the number of devices drawn in the netlist")
-# Electrical testing setpoint:
-m_sweep_points = 5
-V_DC = 100  # V
-I_DC = 10   # A
-f_sw = 100e3
-T_sw = 1 / f_sw
-D_sw = 0.5
-T_on = D_sw * T_sw
+import SimWorkflow as W
+from ResultPlotting import (generate_sweep_plots, generate_perturbation_heat_map,
+                            generate_multiparam_heat_maps, plot_wfm_from_all_runs)
 
 # ---------------------------------------------------------------
+# Settings
+BASE_CONFIG_FILE = W.CONFIG_DIR / 'base_config_4dev.json'  # None -> W.build_default_base_config(N_DEVICES)
+N_DEVICES = 4             # only used when BASE_CONFIG_FILE is None
+SIM_PATH = W.DEFAULT_SIM_PATH
+SIM_TYPE = 'sweep'        # 'sweep', 'perturbation', 'multiparam'
+K_PERTURB = 0.1           # default relative perturbation (p.u.), shown in the heat map title
+SAVE_FIGS = False
+RESULT_FILE = None        # e.g. W.RESULTS_DIR / 'my_study.pkl' to reopen the results in SimGUI later
 
-# Get hemt param baseconfig and add to base_config_dict
+# Sweeps (also used by 'multiparam', which needs exactly two): (param, start, stop, points, log_space)
+SWEEPS = [
+    ('Vgs_th_1', 1.852 - 0.44, 1.852 + 0.44, 10, False),
+    # ('R_drain_1', 1e-3, 10e-3, 5, False),
+    # ('L_drain_1', 500e-12, 50e-9, 5, True),
+    # ('Q_Tj_1', 25, 150, 11, False),
+    # ('Vdrv_on_1', 4.5, 5.5, 5, False),
+]
 
-hemt_base_config = SimConfig.get_hemt_parameters_from_lib()
-
-base_config_dict = {
-    'V_DC': V_DC,
-    'I_DC': I_DC,
-    'N_devices': SimConfig.N_devices
-}
-
-for i in range(1, SimConfig.N_devices + 1):
-    # HEMT device param
-    base_config_dict[f'dev_{i}'] = "EPC2305"  # "use default names from lib"
-    base_config_dict[f"Q_Tj_{i}"] = 25
-    
-    # HEMT cell params
-    base_config_dict[f"R_drain_{i}"] = 1e-3
-    base_config_dict[f"L_drain_{i}"] = 1e-9
-    base_config_dict[f"R_source_{i}"] = 1e-3
-    base_config_dict[f"L_source_{i}"] = 1e-9
-    # Parasitic PCB params
-    base_config_dict[f"R_pcb_branch_{i}"] = 1e-3
-    # Driving circuit params
-    base_config_dict[f"Lg_uncommon_{i}"] = 2.5e-9
-    base_config_dict[f"L_common_source_{i}"] = 200e-12
-    base_config_dict[f"R_driver_{i}"] = 1e-3
-    base_config_dict[f"R_g_{i}"] = 1
-    # Gate Driver params 
-    base_config_dict[f"Vdrv_off_{i}"] = 0
-    base_config_dict[f"Vdrv_on_{i}"] = 5
-    base_config_dict[f"Vdrive_delay_{i}"] = 1e-9
-    base_config_dict[f"tdrv_rise_{i}"] = 1e-9
-    base_config_dict[f"tdrv_fall_{i}"] = 1e-9
-    fsw = 100e3
-    base_config_dict[f"T_sw_{i}"] = 1 / fsw
-    base_config_dict[f"D_on_{i}"] = 0.5
-
-    # HEMT model params
-    hemt_i_base_config = SimConfig.get_hemt_parameters_from_lib()[base_config_dict[f'dev_{i}']][0]
-    base_config_dict.update({k + f'_{i}': v for k, v in hemt_i_base_config.items()})
-
-SimConfig.base_cnfg_dict = base_config_dict.copy()
+# Perturbations: (param, amount, 'rel' | 'abs')
+PERTURBATIONS = [
+    ('Vgs_th_1', 0.1, 'rel'),
+    ('k_gm_factor_1', 0.5, 'rel'),
+    ('Vgs_th_k_corner_1', 0.1, 'rel'),
+    ('Rds_on_base_1', 0.1, 'rel'),
+    ('gm_Tc_1', 0.1, 'rel'),
+    ('Rds_on_Tc_1', 0.1, 'rel'),
+    ('Vgs_th_Tc_1', 0.1, 'rel'),
+    ('Rgate_int_1', 0.1, 'abs'),
+    # ('R_drain_1', K_PERTURB, 'rel'),
+    # ('L_common_source_1', K_PERTURB, 'rel'),
+    # ('Vdrv_on_1', 0.1, 'rel'),
+    # ('T_sw_1', 0.1, 'rel'),
+]
 
 # ---------------------------------------------------------------
-# Define waveforms to save
-wfms_to_save = {}
-for i in range(1, SimConfig.N_devices + 1):
-    wfms_to_save.update({
-        f"vg{i}": f'V(G{i})',
-        f"vs{i}": f'V(S{i})',
-        f"vd{i}": f'V(D{i})',
-        f"vTj{i}": f'V(Tj{i})',
-        f"I(X{i}_L_drain)": f'I(X{i}:L_drain)',
-        f"V(X{i}_hemt_s_nols)": f'V(X{i}:hemt_s_nols)',
-        f"id{i}": f'I(X{i}:L_drain)',
-    })
+base_config = (W.load_base_config(BASE_CONFIG_FILE) if BASE_CONFIG_FILE
+               else W.build_default_base_config(N_DEVICES))
+n_devices = int(base_config['N_devices'])
 
-# ---------------------------------------------------------------
-
-# Define simulation type and parameter variations
-SIM_TYPE = 'sweep'  # 'sweep', 'perturbation', 'multiparam'
-if SIM_TYPE == 'sweep':
-    # SimConfig.add_param_sweep_with_range('R_drain_1', [1e-3, 10e-3], m_points=m_sweep_points)
-    # SimConfig.add_param_sweep_with_range('L_drain_1', [500e-12, 50e-9], m_points=m_sweep_points, log_space=True)
-    SimConfig.add_param_sweep_with_range('Vgs_th_1', [1.852-0.44, 1.852+0.44], m_points=10, log_space=False)
-    # SimConfig.add_param_sweep_with_range('Q_Tj_1', [25, 150], m_points=11, log_space=False)
-    # SimConfig.add_param_sweep_with_range('Vdrv_on_1', [4.5, 5.5], m_points=m_points)
-elif SIM_TYPE == 'perturbation':    
-    SimConfig.default_k_perturb = 0.1  # Modify standard relative perturbation amount (p.u.)
-
-    # Circuit parameter perturbations
-    # SimConfig.add_param_perturbation("R_drain_1")
-    # SimConfig.add_param_perturbation("L_drain_1")
-    # SimConfig.add_param_perturbation("R_source_1")
-    # SimConfig.add_param_perturbation("L_source_1")
-    # SimConfig.add_param_perturbation("R_pcb_branch_1")
-    # SimConfig.add_param_perturbation("Lg_uncommon_1")
-    # SimConfig.add_param_perturbation("L_common_source_1")
-    # SimConfig.add_param_perturbation("Vdrv_off_1")
-    # SimConfig.add_param_perturbation("Vdrv_on_1", perturb_rel=0.1)
-    # SimConfig.add_param_perturbation("Vdrive_delay_1")
-    # SimConfig.add_param_perturbation("tdrv_rise_1")
-    # SimConfig.add_param_perturbation("tdrv_fall_1")
-    # SimConfig.add_param_perturbation("T_sw_1", perturb_rel=0.1)
-
-    # HEMT model perturbations
-    SimConfig.add_param_perturbation('Vgs_th_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('k_gm_factor_1', perturb_rel=0.5)
-    SimConfig.add_param_perturbation('Vgs_th_k_corner_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Rds_on_base_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('gm_Tc_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Rds_on_Tc_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Vgs_th_Tc_1', perturb_rel=0.1)
-    SimConfig.add_param_perturbation('Rgate_int_1', perturb_abs=0.1)
-    # SimConfig.add_param_perturbation("D_on_1")
-    # SimConfig.add_param_perturbation("R_driver_1")
-    # SimConfig.add_param_perturbation("R_g_1")
-    # SimConfig.add_param_perturbation('L_drain_1', 1e-3)
-elif SIM_TYPE == 'multiparam':
-    raise ValueError("multiparam sim not implemented")
+if SIM_TYPE == 'perturbation':
+    study = W.Study(sim_type=SIM_TYPE, perturbations=PERTURBATIONS, k_perturb=K_PERTURB)
+elif SIM_TYPE in ('sweep', 'multiparam'):
+    study = W.Study(sim_type=SIM_TYPE, sweeps=SWEEPS, k_perturb=K_PERTURB)
 else:
     raise ValueError("Invalid SIM_TYPE. Choose from 'sweep', 'perturbation', or 'multiparam'.")
 
+result = W.run_study(SIM_PATH, base_config, W.default_saved_traces(n_devices), study,
+                     on_progress=lambda done, failed, total: print(f'\rSimulations: {done}/{total} done, '
+                                                                  f'{failed} failed', end=''))
+print(f"\nSuccessful/Total Simulations: {result.ok}/{result.total}")
+print(f"Execution time: {result.elapsed_s:.2f} s (simulating {result.sim_s:.2f} s, "
+      f"longest run {result.longest_sim_s:.2f} s, reading results {result.read_s:.2f} s)")
+if result.meas_csv:
+    print(f"Measurements table: {result.meas_csv}")
+if RESULT_FILE:
+    W.save_result(result, RESULT_FILE)
+
 # ---------------------------------------------------------------
-
-start_time = time.time()
-all_meas_results = {}
-for idx, (specific_config, changed_params) in enumerate(SimConfig.yield_cnfgs_sequentially(iter_type=SIM_TYPE)):
-    sim_index = idx + 1
-    # Reset netlist + trim number of devic  es
-    SimConfig.prepare_netlist_for_sim(new_cnfg=specific_config, netlist=netlist, sim_index=sim_index)
-    SimConfig.define_selective_saving(wfms_to_save=wfms_to_save, netlist=netlist)
-    sim_asc_name = f"{netlist.asc_file_path.stem}_sim_{sim_index}.asc"
-    sim = LTC.run(netlist, run_filename=sim_asc_name)
-    # Store the changed parameters for this sim
-    log_name = sim_asc_name.rstrip('.asc')
-    all_meas_results[log_name] = {}
-    all_meas_results[log_name]['config_changes']= changed_params
-
-# Wait for all the sims launched. A timeout counter from last completed sim keeps track of stalled sims
-LTC.wait_completion()
-print('Successful/Total Simulations: ' + str(LTC.okSim) + '/' + str(LTC.runno))
+# Plots. ResultPlotting pops the base run from meas_res, so each call gets its own copy.
+varied_runs = {k: v for k, v in result.meas_res.items() if v['config_changes']}  # base run has no label
 
 
-for raw, log in LTC:
-    raw_data = RawRead(raw)
-    sim_time = raw_data.get_axis() # because LTSpice bug flips some time signs (-10ns?) in 2nd order compression
-    all_meas_results[log.stem]['waveforms'] = {'time': sim_time}
-
-    extracted_wfms = {k: list(raw_data.get_trace(wfm_name)) for k, wfm_name in wfms_to_save.items()}
-    for i in range(1, SimConfig.N_devices + 1):
-        all_meas_results[log.stem]['waveforms'][f'i_drain_{i}'] = list(raw_data.get_trace(f'I(x{i}:L_drain)'))
-        all_meas_results[log.stem]['waveforms'][f'v_gs_{i}'] = [vg-vs for vg, vs in zip(extracted_wfms[f'vg{i}'], extracted_wfms[f'vs{i}'])]
-        all_meas_results[log.stem]['waveforms'][f'v_ds_{i}'] = [vd-vs for vd, vs in zip(extracted_wfms[f'vd{i}'], extracted_wfms[f'vs{i}'])]
-        all_meas_results[log.stem]['waveforms'][f'Tj_{i}'] = extracted_wfms[f'vTj{i}']
-    
-    # Get the names of the variables that were stepped, and the measurements taken
-    log_data = LTSpiceLogReader(log)
-    # step_names = log_data.get_step_vars()
-
-    # Remove extra logged items, and convert single-item lists to values, save to dict
-    meas_results_dict = {k: v for k, v in log_data.dataset.items() if not k.endswith(('_to', '_from', '_at'))}
-    meas_results_dict = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in meas_results_dict.items()}
-    all_meas_results[log.stem]['meas results'] = meas_results_dict
-
-
-# Clean up temporary files (asc, net, log, raw)
-# LTC.file_cleanup()
-
-end_time = time.time()
-print(f"Loop execution time: {end_time - start_time:.2f} seconds")
+def plot_edges(explicit_wfms, skip_branches):
+    for edge in ('rise', 'fall'):
+        plot_wfm_from_all_runs(meas_res=varied_runs, explicit_wfms=explicit_wfms, skip_branches=skip_branches,
+                               base_config=base_config, edge=edge, save_figs=SAVE_FIGS)
 
 
 if SIM_TYPE == 'sweep':
-    generate_sweep_plots(params_to_plot=SimConfig.params_to_plot, meas_res=all_meas_results,
-                         skip_branches=['x3', 'x4'], save_figs=False)
-    plot_wfm_from_all_runs(meas_res=all_meas_results,
-                           explicit_wfms=['time', 'i_drain', 'v_gs'],
-                           skip_branches=[],
-                           base_config=base_config_dict,
-                           edge='rise',
-                           save_figs=False)
-    plot_wfm_from_all_runs(meas_res=all_meas_results,
-                           explicit_wfms=['time', 'i_drain', 'v_gs'],
-                           skip_branches=[],
-                           base_config=base_config_dict,
-                           edge='fall',
-                           save_figs=False)
+    generate_sweep_plots(params_to_plot=result.params_to_plot, meas_res=copy.deepcopy(result.meas_res),
+                         skip_branches=['x3', 'x4'], save_figs=SAVE_FIGS)
+    plot_edges(explicit_wfms=['i_drain', 'v_gs'], skip_branches=[])
 elif SIM_TYPE == 'perturbation':
-    # generate_perturbation_plots(params_to_plot=SimConfig.params_to_plot, meas_res=all_meas_results,
-    #                      skip_branches=['x3', 'x4'], base_config=base_config_dict, save_figs=True)
-    generate_perturbation_heat_map(params_to_plot=SimConfig.params_to_plot,
-                                   meas_res=all_meas_results,
-                                   skip_branches=list(range(3, SimConfig.N_devices + 1)),
-                                   base_config=base_config_dict,
-                                   k_perturb=SimConfig.default_k_perturb,
+    skip = list(range(3, n_devices + 1))
+    generate_perturbation_heat_map(params_to_plot=result.params_to_plot, meas_res=copy.deepcopy(result.meas_res),
+                                   skip_branches=skip, base_config=base_config, k_perturb=K_PERTURB,
                                    save_figs=True)
-    
-    plot_wfm_from_all_runs(meas_res=all_meas_results,
-                           explicit_wfms=[],
-                           skip_branches=list(range(3, SimConfig.N_devices + 1)),
-                           base_config=base_config_dict,
-                           edge='rise',
-                           save_figs=False)
-    plot_wfm_from_all_runs(meas_res=all_meas_results,
-                           explicit_wfms=[],
-                           skip_branches=list(range(3, SimConfig.N_devices + 1)),
-                           base_config=base_config_dict,
-                           edge='fall',
-                           save_figs=False)
+    plot_edges(explicit_wfms=[], skip_branches=skip)
 elif SIM_TYPE == 'multiparam':
-    raise Exception("multiparam sim not implemented")
-else:
-    raise Exception("Wrong SIM_TYPE, choose one from 'sweep', 'perturbation' or 'multiparam'")
+    generate_multiparam_heat_maps(params_to_plot=result.params_to_plot, meas_res=result.meas_res,
+                                  explicit_wfms=['e_on', 'e_off', 'cond_ratio'], save_figs=SAVE_FIGS)
+    plot_edges(explicit_wfms=['i_drain', 'v_gs'], skip_branches=[])

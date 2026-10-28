@@ -8,9 +8,10 @@ __pycache__/
 *.raw
 *.log
 
-# Ignore temp and plots folders
+# Ignore temp, plots and saved study results folders
 /temp/*
 /plots/*
+/results/*
 
 # Distribution / packaging
 .Python

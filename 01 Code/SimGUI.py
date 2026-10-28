@@ -25,6 +25,7 @@ SIM_TYPE_LABELS = {
     '2-param sweep (all combinations)': 'multiparam',
 }
 POLL_MS = 200
+STOPPING_NOTE = "   Stopping: waiting for running simulations..."
 
 
 class ScrollableFrame(ttk.Frame):
@@ -75,6 +76,7 @@ class SimGUI:
 
         # Worker thread communication
         self._worker = None
+        self._stop_event = threading.Event()
         self._msg_queue = queue.Queue()
         self._run_start = None
 
@@ -105,6 +107,7 @@ class SimGUI:
         ttk.Entry(frame, textvariable=self.sim_path_var, state="readonly").pack(side=tk.LEFT, fill=tk.X,
                                                                               expand=True, padx=(0, 8))
         ttk.Button(frame, text="Browse...", command=self.browse_sim_path).pack(side=tk.LEFT)
+        ttk.Button(frame, text="Open in LTspice", command=self.open_schematic).pack(side=tk.LEFT, padx=(6, 0))
 
     def browse_sim_path(self):
         current = Path(self.sim_path_var.get())
@@ -113,6 +116,12 @@ class SimGUI:
         if path:
             self.sim_path_var.set(path)
             self.scan_nodes()
+
+    def open_schematic(self):
+        try:
+            W.open_in_ltspice(self.sim_path_var.get())
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Cannot open schematic", str(exc))
 
     # ==================== Tab 1 / 2) Base configuration ====================
     def create_config_section(self):
@@ -177,13 +186,14 @@ class SimGUI:
         self.config_vars = {}
         global_keys, per_device, n_devices = W.split_config_keys(self.base_config)
 
-        # Global parameters on the first row
-        col = 0
-        for key in global_keys:
-            ttk.Label(inner, text=key).grid(row=0, column=col, sticky=tk.E, padx=(6, 2), pady=2)
+        # Global parameters on the first row, in their own frame so they don't stretch the table columns
+        globals_frame = ttk.Frame(inner)
+        globals_frame.grid(row=0, column=0, columnspan=n_devices + 1, sticky=tk.W)
+        for col, key in enumerate(global_keys):
+            ttk.Label(globals_frame, text=self._with_unit(key, key)).grid(row=0, column=2 * col, sticky=tk.E, padx=(6, 2), pady=2)
             self.config_vars[key] = tk.StringVar(value=str(self.base_config[key]))
-            ttk.Entry(inner, textvariable=self.config_vars[key], width=12).grid(row=0, column=col + 1, sticky=tk.W)
-            col += 2
+            ttk.Entry(globals_frame, textvariable=self.config_vars[key], width=12).grid(row=0, column=2 * col + 1,
+                                                                                       sticky=tk.W)
 
         # Per-device parameters as a table: one row per parameter, one column per device
         ttk.Label(inner, text="Parameter", font=("TkDefaultFont", 9, "bold")).grid(row=1, column=0, sticky=tk.W,
@@ -192,10 +202,28 @@ class SimGUI:
             ttk.Label(inner, text=f"Device {i}", font=("TkDefaultFont", 9, "bold")).grid(row=1, column=i,
                                                                                          pady=(8, 2))
         for row, (base, keys) in enumerate(per_device.items(), start=2):
-            ttk.Label(inner, text=base).grid(row=row, column=0, sticky=tk.W, padx=6)
+            label = W.display_name(base)
+            if label != base:  # HEMT model param: show the SPICE name too
+                label = f"{label} ({base})"
+            ttk.Label(inner, text=self._with_unit(label, base)).grid(row=row, column=0, sticky=tk.W, padx=6)
             for i, key in keys.items():
                 self.config_vars[key] = tk.StringVar(value=str(self.base_config[key]))
                 ttk.Entry(inner, textvariable=self.config_vars[key], width=12).grid(row=row, column=i, padx=1, pady=1)
+            if n_devices > 1:
+                ttk.Button(inner, text="= Dev 1", width=8,
+                           command=lambda k=keys: self._sync_to_first_device(k)).grid(row=row, column=n_devices + 1,
+                                                                                     padx=(6, 2), pady=1)
+
+    def _sync_to_first_device(self, keys):
+        """keys = {device index: config key} of one parameter row; copy device 1's text to the others."""
+        value = self.config_vars[keys[min(keys)]].get()
+        for key in keys.values():
+            self.config_vars[key].set(value)
+
+    @staticmethod
+    def _with_unit(label, key):
+        unit = W.param_unit(key)
+        return f"{label} [{unit}]" if unit else label
 
     def _read_config_fields(self):
         raw = {key: var.get() for key, var in self.config_vars.items()}
@@ -262,35 +290,34 @@ class SimGUI:
         self.add_row_button = ttk.Button(bar, text="Add parameter", command=self.add_study_row)
         self.add_row_button.pack(side=tk.RIGHT)
 
-        self.study_header = ttk.Frame(frame)
-        self.study_header.pack(fill=tk.X, pady=(6, 0))
-        self.study_rows_frame = ttk.Frame(frame)
-        self.study_rows_frame.pack(fill=tk.X)
+        # Header and rows share one grid so the columns line up
+        self.study_grid = ttk.Frame(frame)
+        self.study_grid.pack(fill=tk.X, pady=(6, 0))
+        self._next_grid_row = 1
 
     def _sim_type(self):
         return SIM_TYPE_LABELS[self.sim_type_var.get()]
 
     def _reset_study_rows(self):
         for row in self.study_rows:
-            row['frame'].destroy()
             row.clear()  # break widget<->row reference cycles (see start_run)
         self.study_rows = []
-        for child in self.study_header.winfo_children():
+        for child in self.study_grid.winfo_children():
             child.destroy()
+        self._next_grid_row = 1
 
         is_perturb = self._sim_type() == 'perturbation'
         if is_perturb:
             self.k_perturb_label.pack(side=tk.LEFT)
             self.k_perturb_entry.pack(side=tk.LEFT, padx=(4, 0))
-            headers = [("Parameter", 22), ("Base value", 14), ("Tolerance", 10), ("rel/abs", 8)]
+            headers = ["Parameter", "Base value", "Tolerance", "rel/abs"]
         else:
             self.k_perturb_label.pack_forget()
             self.k_perturb_entry.pack_forget()
-            headers = [("Parameter", 22), ("Base value", 14), ("Start", 10), ("Stop", 10), ("Points", 7),
-                       ("Log", 5)]
-        for text, width in headers:
-            ttk.Label(self.study_header, text=text, width=width, font=("TkDefaultFont", 9, "bold")).pack(
-                side=tk.LEFT, padx=2)
+            headers = ["Parameter", "Base value", "Start", "Stop", "Points", "Log"]
+        for col, text in enumerate(headers):
+            ttk.Label(self.study_grid, text=text, font=("TkDefaultFont", 9, "bold")).grid(
+                row=0, column=col, sticky=tk.W, padx=2)
 
         for _ in range(2 if self._sim_type() == 'multiparam' else 1):
             self.add_study_row()
@@ -299,43 +326,47 @@ class SimGUI:
         sim_type = self._sim_type()
         if sim_type == 'multiparam' and len(self.study_rows) >= 2:
             return
-        frame = ttk.Frame(self.study_rows_frame)
-        frame.pack(fill=tk.X, pady=1)
-        row = {'frame': frame, 'param': tk.StringVar(), 'base': tk.StringVar()}
+        grid, r = self.study_grid, self._next_grid_row
+        self._next_grid_row += 1
+        row = {'param': tk.StringVar(), 'base': tk.StringVar()}
 
-        param_combo = ttk.Combobox(frame, textvariable=row['param'], state="readonly", width=22,
-                                   values=W.variable_params(self.base_config))
-        param_combo.pack(side=tk.LEFT, padx=2)
-        param_combo.bind("<<ComboboxSelected>>", lambda e, r=row: self._show_base_value(r))
-        ttk.Label(frame, textvariable=row['base'], width=14, foreground="gray35").pack(side=tk.LEFT, padx=2)
+        param_names = [W.display_name(k) for k in W.variable_params(self.base_config)]
+        param_combo = ttk.Combobox(grid, textvariable=row['param'], state="readonly", width=22, values=param_names)
+        param_combo.bind("<<ComboboxSelected>>", lambda e, rw=row: self._show_base_value(rw))
+        widgets = [param_combo, ttk.Label(grid, textvariable=row['base'], width=14, foreground="gray35")]
 
         if sim_type == 'perturbation':
             row['amount'] = tk.StringVar(value=self.k_perturb_var.get())
             row['mode'] = tk.StringVar(value='rel')
-            ttk.Entry(frame, textvariable=row['amount'], width=10).pack(side=tk.LEFT, padx=2)
-            ttk.Combobox(frame, textvariable=row['mode'], values=W.PERTURB_MODES, state="readonly",
-                         width=6).pack(side=tk.LEFT, padx=2)
+            widgets += [ttk.Entry(grid, textvariable=row['amount'], width=10),
+                        ttk.Combobox(grid, textvariable=row['mode'], values=W.PERTURB_MODES, state="readonly",
+                                     width=6)]
         else:
             row['start'], row['stop'] = tk.StringVar(), tk.StringVar()
             row['points'], row['log'] = tk.StringVar(value="5"), tk.BooleanVar(value=False)
-            for key, width in (('start', 10), ('stop', 10), ('points', 7)):
-                ttk.Entry(frame, textvariable=row[key], width=width).pack(side=tk.LEFT, padx=2)
-            ttk.Checkbutton(frame, variable=row['log']).pack(side=tk.LEFT, padx=(8, 2))
+            widgets += [ttk.Entry(grid, textvariable=row[key], width=width)
+                        for key, width in (('start', 10), ('stop', 10), ('points', 7))]
+            widgets.append(ttk.Checkbutton(grid, variable=row['log']))
 
         if sim_type != 'multiparam':
-            ttk.Button(frame, text="Remove", width=8,
-                       command=lambda r=row: self._remove_study_row(r)).pack(side=tk.LEFT, padx=(8, 0))
+            widgets.append(ttk.Button(grid, text="Remove", width=8,
+                                      command=lambda rw=row: self._remove_study_row(rw)))
+        for col, widget in enumerate(widgets):
+            widget.grid(row=r, column=col, sticky=tk.W, padx=2, pady=1)
+        row['widgets'] = widgets
         self.study_rows.append(row)
         self.add_row_button.configure(state=tk.DISABLED if sim_type == 'multiparam' else tk.NORMAL)
 
     def _remove_study_row(self, row):
-        row['frame'].destroy()
+        for widget in row['widgets']:
+            widget.destroy()
         self.study_rows.remove(row)
         row.clear()
 
     def _show_base_value(self, row):
-        var = self.config_vars.get(row['param'].get())
-        row['base'].set(var.get() if var else "")
+        key = W.config_key(row['param'].get())
+        var = self.config_vars.get(key)
+        row['base'].set(f"{var.get()} {W.param_unit(key)}".strip() if var else "")
 
     def _read_study_rows(self):
         rows = []
@@ -350,6 +381,8 @@ class SimGUI:
         frame.pack(fill=tk.X, padx=6, pady=6)
         self.run_button = ttk.Button(frame, text="Run", width=14, command=self.start_run)
         self.run_button.pack(side=tk.LEFT)
+        self.stop_button = ttk.Button(frame, text="Stop", width=10, command=self.stop_run, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=(6, 0))
         status = ttk.Frame(frame)
         status.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 0))
         ttk.Label(status, textvariable=self.elapsed_var).pack(anchor=tk.W)
@@ -373,18 +406,27 @@ class SimGUI:
         # tkinter raises "main thread is not in main loop"
         gc.collect()
         self.run_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(state=tk.NORMAL)
+        self._stop_event = threading.Event()
         self._run_start = time.monotonic()
         self._update_progress(0, 0, 0)
         self._worker = threading.Thread(target=self._run_worker, daemon=True,
-                                        args=(self.sim_path_var.get(), base_config, traces, study))
+                                        args=(self.sim_path_var.get(), base_config, traces, study,
+                                              self._stop_event))
         self._worker.start()
         self.root.after(POLL_MS, self._poll_worker)
 
-    def _run_worker(self, sim_path, base_config, traces, study):
+    def stop_run(self):
+        self._stop_event.set()
+        self.stop_button.configure(state=tk.DISABLED)
+        self.progress_var.set(self.progress_var.get() + STOPPING_NOTE)
+
+    def _run_worker(self, sim_path, base_config, traces, study, stop_event):
         """Runs in the worker thread: only talks to the GUI through the queue."""
         try:
             result = W.run_study(sim_path, base_config, traces, study,
-                                 on_progress=lambda c, f, t: self._msg_queue.put(('progress', c, f, t)))
+                                 on_progress=lambda c, f, t: self._msg_queue.put(('progress', c, f, t)),
+                                 stop_event=stop_event)
             self._msg_queue.put(('done', result))
         except Exception:
             self._msg_queue.put(('error', traceback.format_exc()))
@@ -406,15 +448,20 @@ class SimGUI:
         if finished:
             self._run_start = None
             self.run_button.configure(state=tk.NORMAL)
+            self.stop_button.configure(state=tk.DISABLED)
         else:
             self.root.after(POLL_MS, self._poll_worker)
 
     def _update_progress(self, completed, failed, total):
-        self.progress_var.set(f"Completed: {completed} / {total}   Pending: {total - completed}   Failed: {failed}")
+        text = f"Completed: {completed} / {total}   Pending: {total - completed}   Failed: {failed}"
+        self.progress_var.set(text + (STOPPING_NOTE if self._stop_event.is_set() else ""))
         self.progress_bar.configure(maximum=max(total, 1), value=completed)
 
     def _on_run_done(self, result):
+        self._stop_event.clear()
         self._update_progress(result.ok + result.failed, result.failed, result.total)
+        if result.stopped:
+            self.progress_var.set(self.progress_var.get() + "   (stopped early)")
         if not result.meas_res:
             messagebox.showwarning("No results", "No simulation produced results. Check the logs in temp/.")
             return
@@ -424,8 +471,14 @@ class SimGUI:
 
     # ==================== Tab 2: Plots ====================
     def create_plot_tab(self):
-        self.result_summary_var = tk.StringVar(value="Run a study first.")
-        ttk.Label(self.plot_tab, textvariable=self.result_summary_var, padding=8).pack(anchor=tk.W)
+        self.result_summary_var = tk.StringVar(value="Run a study first, or load saved results.")
+        top = ttk.Frame(self.plot_tab, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Button(top, text="Load results...", command=self.load_results).pack(side=tk.LEFT)
+        self.save_results_button = ttk.Button(top, text="Save results as...", command=self.save_results,
+                                              state=tk.DISABLED)
+        self.save_results_button.pack(side=tk.LEFT, padx=(6, 12))
+        ttk.Label(top, textvariable=self.result_summary_var, wraplength=700).pack(side=tk.LEFT, anchor=tk.W)
 
         body = ttk.Frame(self.plot_tab)
         body.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
@@ -447,11 +500,41 @@ class SimGUI:
         ttk.Button(bar, text="Close all figures", command=lambda: plt.close('all')).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Label(bar, textvariable=self.plot_status_var, foreground="gray35").pack(side=tk.LEFT, padx=(12, 0))
 
+    def load_results(self):
+        W.RESULTS_DIR.mkdir(exist_ok=True)
+        path = filedialog.askopenfilename(title="Load study results", initialdir=W.RESULTS_DIR,
+                                          filetypes=[("Study results", "*.pkl")])
+        if not path:
+            return
+        try:
+            self.result = W.load_result(path)
+        except Exception as exc:
+            messagebox.showerror("Load failed", str(exc))
+            return
+        self._populate_plot_tab()
+
+    def save_results(self):
+        if self.result is None:
+            return
+        W.RESULTS_DIR.mkdir(exist_ok=True)
+        default = f"{Path(self.result.sim_path).stem or 'study'}_{self.result.sim_type}_{time.strftime('%Y%m%d_%H%M')}"
+        path = filedialog.asksaveasfilename(title="Save study results", initialdir=W.RESULTS_DIR,
+                                            initialfile=default, defaultextension=".pkl",
+                                            filetypes=[("Study results", "*.pkl")])
+        if path:
+            W.save_result(self.result, path)
+            self.plot_status_var.set(f"Results saved to {Path(path).name}")
+
     def _populate_plot_tab(self):
         r = self.result
+        self.save_results_button.configure(state=tk.NORMAL)
         self.result_summary_var.set(
-            f"Study: {r.sim_type}   Runs: {r.total} ({r.ok} ok, {r.failed} failed)   "
-            f"Varied: {', '.join(r.params_to_plot)}   Time: {r.elapsed_s:.1f} s")
+            f"Study: {r.sim_type}{' (stopped early)' if r.stopped else ''}   "
+            f"Runs: {r.total} ({r.ok} ok, {r.failed} failed)   "
+            f"Varied: {', '.join(W.display_name(p) for p in r.params_to_plot)}   "
+            f"Time: {r.elapsed_s:.1f} s (simulating {r.sim_s:.1f} s, longest run {r.longest_sim_s:.1f} s, "
+            f"reading results {r.read_s:.1f} s)"
+            + (f"\nMeasurements table: {r.meas_csv}" if r.meas_csv else ""))
         self.available_plots = W.available_plots(r)
         self.plot_listbox.delete(0, tk.END)
         for spec in self.available_plots:

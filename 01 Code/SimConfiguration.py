@@ -102,9 +102,9 @@ class LtSimConfiguration:
     def yield_cnfgs_sequentially(self, iter_type: str='sweep'):
         """Yields configurations one at a time based on the specified iteration type.
          iter_type: 
-         'sweep' for single parameter sweeps, 
+         'sweep' for single parameter sweeps,
          'perturbation' for single parameter perturbations,
-         'multiparam' for multi-parameter sweeps.
+         'multiparam' for a grid of all combinations of exactly two swept parameters.
         returns: Yields a tuple of (configuration_dict, changed_params_dict) for each configuration."""
         if self.base_cnfg_dict != {}:
             yield self.base_cnfg_dict, {}  # Yield the base configuration first
@@ -123,43 +123,41 @@ class LtSimConfiguration:
         else:
             raise ValueError("Base configuration dictionary is empty. Please set it before yielding configurations.")
         
+    def _config_with(self, changes: dict):
+        """Copy of the base config with changes applied. A device whose HEMT model param changes is
+        pointed at its own model variant (dev_<i> = '<model>_<i>'), also when two of its params change."""
+        config = self.base_cnfg_dict.copy()
+        config.update(changes)
+        for param_name in changes:
+            if self._is_epc_param(param_name, type='spice'):
+                subindex = param_name.rsplit('_', 1)[-1]
+                config[f'dev_{subindex}'] = config[f'dev_{subindex}'].split('_')[0] + '_' + subindex
+        return config
+
     def single_param_sweep_generator(self):
         """Generates configurations by sweeping one parameter at a time.
         returns: Yields a tuple of (configuration_dict, changed_params_dict) for each configuration."""
         for param_name, param_range in self.config_ranges.items():
             for param_value in param_range:
-                config = self.base_cnfg_dict.copy()
-                config[param_name] = param_value
-                # Adjust device to modified lib entry if EPC parameter is hemt parameter
-                if self._is_epc_param(param_name, type='spice'):
-                    subindex = param_name.rsplit('_', 1)[-1]
-                    config[f'dev_{subindex}'] += '_' + subindex
-                yield config, {param_name: param_value}
+                changes = {param_name: param_value}
+                yield self._config_with(changes), changes
 
     def single_param_perturbation_generator(self):
         """Generates configurations by perturbing one parameter at a time.
         returns: Yields a tuple of (configuration_dict, changed_params_dict) for each configuration."""
         for param_name, perturb_magnitude in self.perturb_params.items():
-            if param_name in self.base_cnfg_dict.keys():
-                config = self.base_cnfg_dict.copy()
-                new_val = config[param_name] + perturb_magnitude
-                config[param_name] = new_val
-                # Adjust device to modified lib entry if EPC parameter is hemt parameter
-                if self._is_epc_param(param_name, type='spice'):
-                    subindex = param_name.rsplit('_', 1)[-1]
-                    config[f'dev_{subindex}'] += '_' + subindex
-                yield config, {param_name: config[param_name]}
+            changes = {param_name: self.base_cnfg_dict[param_name] + perturb_magnitude}
+            yield self._config_with(changes), changes
 
     def multiparam_sweep_generator(self):
-        """Generates configurations for all combinations of parameters in config_ranges.
+        """Generates the grid of all combinations of the two parameters in config_ranges.
         returns: Yields a tuple of (configuration_dict, changed_params_dict) for each configuration."""
-        param_names = list(self.config_ranges.keys())
-        param_ranges = [self.config_ranges[name] for name in param_names]
-        
-        for param_values in product(*param_ranges):
-            config = self.base_cnfg_dict.copy()
-            config.update(dict(zip(param_names, param_values)))
-            yield config, dict(zip(param_names, param_values))
+        if len(self.config_ranges) != 2:
+            raise ValueError(f"multiparam needs exactly two swept parameters, got {len(self.config_ranges)}")
+        (name_1, range_1), (name_2, range_2) = self.config_ranges.items()
+        for value_1, value_2 in product(range_1, range_2):
+            changes = {name_1: value_1, name_2: value_2}
+            yield self._config_with(changes), changes
     
     def modify_hemt_device_count(self, N_devices: int):
         """Modifies the number of parallel HEMT devices in the base configuration."""
@@ -424,7 +422,9 @@ class LtSimConfiguration:
             # Update changed params
         
         # self.generate_modif_lib(orig_hemt_name=device_key, model_changes=changed_params_by_device)
-        changed_device_models = self.generate_modif_device_models(orig_hemt_name=device_key, model_changes=changed_params_by_device)
+        # device_key may already carry a '_<i>' suffix (e.g. 'EPC2305_4'); the library only has the base model
+        changed_device_models = self.generate_modif_device_models(orig_hemt_name=device_key.split('_')[0],
+                                                                  model_changes=changed_params_by_device)
         for block in changed_device_models:
             # Construct the new file name using the asc file name and the second string after a space in the block
             device_name = block.splitlines()[0].split()[1]
@@ -448,7 +448,7 @@ class LtSimConfiguration:
             # Power Loss measurements
             delta_t_loss_meas = min(500e-9, T_on_i * 0.025)
             P_on_times  = [T_sw, T_sw + delta_t_loss_meas]
-            P_off_times = [T_sw, T_on_i + tdrv_r + T_on_i + delta_t_loss_meas]
+            P_off_times = [T_sw + T_on_i, T_sw + T_on_i + tdrv_r + delta_t_loss_meas]  # turn-off edge of 2nd period
             # Vds Overshoot params
             Vds_pk_times = [T_sw + tdrv_r + T_on_i, T_sw + tdrv_r + T_on_i + T_off / 2]
             # Vgs Overshoot params

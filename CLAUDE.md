@@ -17,7 +17,7 @@ The folders are numbered and contain spaces, so always quote paths:
 | `05 Oscilloscope Waveform Extractor/` | Grabs waveforms from an R&S MXO44 scope over LAN (RsInstrument) and saves them as CSV/NPZ |
 | `temp/`, `plots/` | Generated outputs (gitignored) |
 
-There are no tests, no build system for the Python code, and no requirements file. Python ≥3.12 is assumed: the code uses nested f-string quotes and `X | None` hints. Dependencies: `PyLTSpice`, `spicelib`, `numpy`, `scipy`, `pandas`, `matplotlib`, `seaborn`, `pyserial`, `RsInstrument`. You also need LTspice installed (Windows).
+There are no tests and no build system for the Python code. `requirements.txt` at the repo root lists the packages. Python ≥3.12 is assumed: the code uses nested f-string quotes and `X | None` hints. Dependencies: `PyLTSpice`, `spicelib`, `numpy`, `scipy`, `pandas`, `matplotlib`, `seaborn`, `pyserial`, `RsInstrument`. You also need LTspice installed (Windows).
 
 ## Running things
 
@@ -25,8 +25,7 @@ There are no tests, no build system for the Python code, and no requirements fil
 # Simulation GUI (recommended way to run studies; works from any CWD)
 python "01 Code/SimGUI.py"
 
-# Same flow as a script, configured by editing it. Run from the REPO ROOT: sim_path
-# ('./02 Simulations/...') and output_folder='temp' are relative to the CWD.
+# Same flow as a script, configured by editing the settings at its top (works from any CWD)
 python "01 Code/ParallelGaN_script.py"
 
 # PC GUI (run from its folder so `from serial_comm import SerialManager` resolves)
@@ -43,13 +42,13 @@ You build and flash the firmware in **STM32CubeIDE** (`Micro_buck.ioc`, `Micro_b
 
 ## Simulation pipeline (`01 Code`)
 
-The scripts are configured by editing them, not through a CLI. `ParallelGaN_script.py` is the driver:
+The scripts are configured by editing them, not through a CLI. `ParallelGaN_script.py` is a thin driver over `SimWorkflow` (settings at the top: base config JSON, `SIM_TYPE`, `SWEEPS`, `PERTURBATIONS`). The flow, implemented in `SimWorkflow.run_study`:
 
-1. Builds `base_config_dict`: global `V_DC`, `I_DC`, `N_devices`, plus **per-device parameters suffixed `_<i>`** (`R_drain_1`, `Lg_uncommon_2`, `Vdrv_on_3`, …). HEMT model parameters are pulled from the library and stored by their **SPICE names** (`k2_1`, `A1_1`, `rpara_1`, …).
-2. Picks `SIM_TYPE` (`'sweep'` | `'perturbation'`; `'multiparam'` is unimplemented) and registers parameters with `add_param_sweep_with_range` / `add_param_perturbation`.
+1. The base config: global `V_DC`, `I_DC`, `N_devices`, plus **per-device parameters suffixed `_<i>`** (`R_drain_1`, `Lg_uncommon_2`, `Vdrv_on_3`, …). HEMT model parameters are pulled from the library and stored by their **SPICE names** (`k2_1`, `A1_1`, `rpara_1`, …).
+2. The study type (`'sweep'` | `'perturbation'` | `'multiparam'`) and its parameters, registered with `add_param_sweep_with_range` / `add_param_perturbation`.
 3. For each config from `yield_cnfgs_sequentially` (the base config always comes first), calls `prepare_netlist_for_sim` and then `SimRunner.run`, with up to 16 parallel LTspice runs.
-4. Reads the `.raw` files (waveforms) and `.log` files (`.meas` results) into `all_meas_results[<run name>]` = `{config_changes, waveforms, 'meas results'}`.
-5. Plots through `ResultPlotting.py` (sweep plots, perturbation heat map/bar plots, overlaid rise/fall edge waveforms).
+4. Reads the `.raw` files (waveforms) and `.log` files (`.meas` results) into `meas_res[<run name>]` (see *Results structure* below).
+5. Plots through `ResultPlotting.py` (sweep plots, perturbation heat map/bar plots, 2-param heat maps, overlaid rise/fall edge waveforms).
 
 `SimConfiguration.LtSimConfiguration` holds the main logic:
 
@@ -91,9 +90,15 @@ Put new logic in `SimWorkflow.py`, or in `LtSimConfiguration` / `ResultPlotting`
    - The rows of varied parameters change with the type. `build_study` turns them into a `Study`.
 5. **Run button.**
    - `run_study` runs in a worker thread. It reports `on_progress(completed, failed, total)` through a `queue.Queue` that the GUI polls with `after()`, which drives the elapsed time, the counters and the progress bar.
+   - **Stop** sets the `stop_event`: no new runs are launched, the running ones finish, and the partial result is kept (`StudyResult.stopped`).
    - Tk must only be touched from the main thread. Tk variables freed by the garbage collector in the worker thread cause `RuntimeError: main thread is not in main loop`. That's why `start_run` calls `gc.collect()` and removed study rows are `clear()`ed.
 
 **Tab 2, Plots.** It is a generic editor over `SimWorkflow.PLOTS`:
+
+- 2-param studies get `generate_multiparam_heat_maps` (KPI over the grid, one heat map per device) and `plot_wfm_2param` (colour = first param with a stepped colour bar, line width = second param; `swap_axes` exchanges them). `plot_wfm_from_all_runs` (one legend entry per run) is only offered for sweep/perturbation.
+- After a 2-param (multiparam) study, `run_study` also writes `results/<asc stem>_multiparam_<timestamp>.csv` with `export_meas_csv`: one row per run (base run first), columns = the two parameter values, then every `.meas` value. The path is in `StudyResult.meas_csv`.
+- *Save results as...* / *Load results...* pickle the whole `StudyResult` to `results/` (gitignored) with `save_result` / `load_result`, so plots can be redone without simulating.
+- `StudyResult` also carries a time breakdown (`sim_s`, `longest_sim_s`, `read_s`), shown in the summary line.
 
 - Each `PlotSpec` wraps one `ResultPlotting` function and lists the study types it applies to.
 - `plot_args()` reads the function's **real signature**:
@@ -120,6 +125,8 @@ Failed runs are dropped.
 
 - `run_study` registers `02 Simulations/00 ComonLibs` as an AscEditor library path. Without it, `gate_cell_V1.asy` is only found when the CWD is the repo root.
 - `run_study` also `chdir`s to the repo root while it runs. That changes the CWD of the whole process.
+- Every LTspice run uses all CPU threads. `PARALLEL_SIMS = cpu_count // 4` (8 on 32 threads). At 16, runs slowed from ~3 s to over 30 s and were killed by `SIM_TIMEOUT_S`.
+- LTspice rejects 0 Ω resistors ("Resistance must not be zero"). `build_study` and `validate_base_config` refuse them.
 
 ## Other analysis scripts
 
@@ -145,4 +152,6 @@ Only edit inside the `/* USER CODE BEGIN … */ … /* USER CODE END … */` blo
 - Hard-coded settings sit at the top of each script, as constants (`V_DC`, `SCOPE_IP`, …). Change them there; don't add CLI argument parsing.
 - LTspice is auto-detected (`SimRunner(simulator=None)`). Don't hard-code a path to the LTspice executable.
 - Device indexing is 1-based everywhere (`_1 … _N`). Some plotting `skip_branches` arguments take strings like `'x3'` and others take integers. `SimWorkflow._convert_skip_branches` deals with this for the GUI.
-- `SimWorkflow.py` and `ParallelGaN_script.py` hold the same default circuit values. If you change one, change the other.
+- Default circuit values live in `SimWorkflow.build_default_base_config` and in the JSON files in `01 Code/configs/`. `ParallelGaN_script.py` has no defaults of its own.
+- HEMT model params are stored by SPICE name (`k2_1`) but shown in the GUI and plot labels by friendly name (`Vgs_th_1`). Convert with `SimWorkflow.display_name` / `config_key` (or `ResultPlotting.friendly_name`).
+- Config values are plain SI numbers. The GUI labels show the unit from `SimWorkflow.PARAM_UNITS`. When you add a config parameter, add its unit there too.

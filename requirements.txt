@@ -1,0 +1,17 @@
+# Python >= 3.12. LTspice must also be installed (Windows); PyLTSpice finds it automatically.
+# Minimum versions are the ones the code was developed with.
+
+# Simulation, analysis and plotting (01 Code)
+PyLTSpice>=5.4.3
+spicelib>=1.4.6
+numpy>=2.1
+scipy>=1.15
+pandas>=2.1
+matplotlib>=3.10
+seaborn>=0.13
+
+# Board GUI (03 PC GUI)
+pyserial>=3.5
+
+# Scope waveform grabber (05 Oscilloscope Waveform Extractor)
+RsInstrument>=1.124
