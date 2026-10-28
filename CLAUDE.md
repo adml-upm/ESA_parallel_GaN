@@ -22,8 +22,11 @@ There are no tests, no build system for the Python code, and no requirements fil
 ## Running things
 
 ```powershell
-# LTspice sweep/perturbation study. Run from the REPO ROOT: sim_path ('./02 Simulations/...')
-# and output_folder='temp' are relative to the CWD.
+# Simulation GUI (recommended way to run studies; works from any CWD)
+python "01 Code/SimGUI.py"
+
+# Same flow as a script, configured by editing it. Run from the REPO ROOT: sim_path
+# ('./02 Simulations/...') and output_folder='temp' are relative to the CWD.
 python "01 Code/ParallelGaN_script.py"
 
 # PC GUI (run from its folder so `from serial_comm import SerialManager` resolves)
@@ -54,8 +57,71 @@ The scripts are configured by editing them, not through a CLI. `ParallelGaN_scri
 - **Per-device model variants:** when an EPC model parameter of device *i* changes, the device is renamed `EPC2305_<i>`. `reset_and_trim_netlist` then writes a modified `.subckt` copy to `temp/<asc stem>_<sim_index>_EPC2305_<i>.lib` and adds a `.lib` line to the netlist. The source library `02 Simulations/00 ComonLibs/EPCGaNLibrary.lib` is never modified on this path. (`generate_modif_lib`, which rewrites the library in place after a marker comment, is legacy and its call is commented out.)
 - **Netlist trimming:** the schematic `ParGan_V4.asc` draws `TOTAL_DRAWN_DEVICES = 10` branches. Branches `N_devices+1..10` are removed by component name (`X{i}`, `XG{i}`, `Vgdrv{i}`, `R{i}`, `R_{i-1}{i}`). If you rename components in the `.asc`, this code must change with them.
 - `update_netlist_params` sets `.tran` (2 switching periods) and writes every config key as `.param`. It also rebuilds each gate driver `PULSE(...)` source and each loss behavioural source `B{i}`.
-- `introduce_meas_commands` adds the per-device `.meas` lines: `X{i}_E_on`, `_E_off`, `_vds_pk`, `_vgs_pk`, `_rms_i`, `_MaxTj_on/off` and `_cond_ratio`. Plotting code finds results by these names.
+- `introduce_meas_commands` adds the per-device `.meas` lines: `X{i}_E_on`, `_E_off`, `_vds_pk`, `_vgs_pk`, `_rms_i`, `_MaxTj_on/off` and `_cond_ratio`. Plotting code finds results by these names. LTspice reports them in lowercase (`x1_e_on`).
+- `define_selective_saving` writes the `.save` lines and **always adds `meas_required_traces()`**. When `.save` is present, LTspice keeps only the saved quantities. It aborts the transient ("Current not found") if a `.meas` uses an unsaved one. If you add or change a `.meas` expression, add its traces to `meas_required_traces()`.
 - Node and current names such as `V(G{i})`, `I(X{i}:L_drain)`, `X{i}:hemt_s_noLs`, `xg{i}:Lg_minusLcommonsrc` and `V(Tj{i})` are tied to the hierarchy in `hemt_cell_V*.asc` / `gate_cell_V1.asc` / `ThermalNetwork_EPC2305.asc` in `00 ComonLibs`.
+
+## Simulation GUI (`01 Code/SimGUI.py` + `SimWorkflow.py`)
+
+The GUI runs the same flow as `ParallelGaN_script.py`. The code is split into strict layers:
+
+| File | Role | Rule |
+|---|---|---|
+| `SimGUI.py` | Tkinter view and flow control only | No simulation or plot logic. Passes raw entry text to `SimWorkflow` and shows the `ValueError` messages it raises |
+| `SimWorkflow.py` | Logic layer used by the GUI | No tkinter imports. Orchestrates the steps; delegates to the two modules below |
+| `SimConfiguration.py` | Netlist, config and `.meas` logic (`LtSimConfiguration`) | Shared with the script |
+| `ResultPlotting.py` | Plot functions | Shared with the script; the GUI calls them unchanged |
+
+Put new logic in `SimWorkflow.py`, or in `LtSimConfiguration` / `ResultPlotting` when the script should get it too. Never put it in `SimGUI.py`.
+
+**Tab 1, Simulation.** It has five sections stacked vertically:
+
+1. **`.asc` file picker.** Defaults to `ParGan_V4.asc`.
+2. **Base config editor.**
+   - The config is loaded from and saved to JSON files in `01 Code/configs/`. `base_config_4dev.json` loads at startup.
+   - **Generate** builds the script's defaults for N devices with `build_default_base_config`, reading HEMT params from the `.lib`.
+   - Fields are rebuilt from the dict's keys: global keys in one row, then a table with one row per parameter and one column per device (`split_config_keys`).
+   - Values may use engineering notation (`2.5n`). `parse_config_values` converts them back using the loaded dict's types.
+3. **Nodes to save.**
+   - `scan_asc_nodes` lists `V(<net>)` for every `FLAG`, plus the known `hemt_cell` internal traces (`HEMT_CELL_TRACES`) of each `X{i}` instance.
+   - Anything indexed above N_devices is dropped, because those branches get trimmed.
+   - `default_saved_traces` pre-selects what the derived waveforms need.
+4. **Study type.**
+   - The types are sweep, perturbation and 2-param (multiparam, all combinations).
+   - The rows of varied parameters change with the type. `build_study` turns them into a `Study`.
+5. **Run button.**
+   - `run_study` runs in a worker thread. It reports `on_progress(completed, failed, total)` through a `queue.Queue` that the GUI polls with `after()`, which drives the elapsed time, the counters and the progress bar.
+   - Tk must only be touched from the main thread. Tk variables freed by the garbage collector in the worker thread cause `RuntimeError: main thread is not in main loop`. That's why `start_run` calls `gc.collect()` and removed study rows are `clear()`ed.
+
+**Tab 2, Plots.** It is a generic editor over `SimWorkflow.PLOTS`:
+
+- Each `PlotSpec` wraps one `ResultPlotting` function and lists the study types it applies to.
+- `plot_args()` reads the function's **real signature**:
+  - `meas_res` and `base_config` (`AUTO_ARGS`) are filled from the `StudyResult`.
+  - Every other argument becomes a `PlotArg` (`multi` / `choice` / `bool` / `text`), with choices and defaults taken from the result. The GUI draws a widget per kind.
+- `launch_plot()` converts the values and calls the function:
+  - It deep-copies `meas_res`, because ResultPlotting pops the base run.
+  - It drops the base run for `plot_wfm_from_all_runs`.
+  - It converts `skip_branches` to the format each function expects: substring `'x3_'` or int `3`.
+  - It runs inside `chdir(REPO_ROOT)` so `save_figs` writes to `plots/`.
+- `SimGUI.main()` sets `plt.ion()`, so the `plt.show()` calls inside ResultPlotting open non-blocking windows.
+- **To add a plot:** write the function in `ResultPlotting.py` and add a `PlotSpec` to `PLOTS`. Argument names already known to `plot_args()` get proper widgets. Unknown ones fall back to a text field, parsed as a number when possible.
+
+**Results structure.** `StudyResult.meas_res[run_name]` contains:
+
+- `config_changes`
+- `meas results`: the `.meas` values.
+- `traces`: every saved node, keyed by its expression.
+- `waveforms`: `time` plus the derived per-device `i_drain_i`, `v_gs_i`, `v_ds_i`, `Tj_i`. These are built only when their source traces were saved.
+
+Failed runs are dropped.
+
+**Gotchas.**
+
+- `run_study` registers `02 Simulations/00 ComonLibs` as an AscEditor library path. Without it, `gate_cell_V1.asy` is only found when the CWD is the repo root.
+- `run_study` also `chdir`s to the repo root while it runs. That changes the CWD of the whole process.
+
+## Other analysis scripts
 
 `GanLossEstimation.py` is a standalone analytical loss model (`GaNDevice`, datasheet polynomial fits) for EPC2305. `sim_runner_asc_example.py` is a PyLTSpice usage example built on `02 Simulations/01 Examples/Batch_Test.asc`.
 
@@ -78,4 +144,5 @@ Only edit inside the `/* USER CODE BEGIN … */ … /* USER CODE END … */` blo
 
 - Hard-coded settings sit at the top of each script, as constants (`V_DC`, `SCOPE_IP`, …). Change them there; don't add CLI argument parsing.
 - LTspice is auto-detected (`SimRunner(simulator=None)`). Don't hard-code a path to the LTspice executable.
-- Device indexing is 1-based everywhere (`_1 … _N`). Some plotting `skip_branches` arguments take strings like `'x3'` and others take integers.
+- Device indexing is 1-based everywhere (`_1 … _N`). Some plotting `skip_branches` arguments take strings like `'x3'` and others take integers. `SimWorkflow._convert_skip_branches` deals with this for the GUI.
+- `SimWorkflow.py` and `ParallelGaN_script.py` hold the same default circuit values. If you change one, change the other.
