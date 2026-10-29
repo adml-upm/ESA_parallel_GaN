@@ -2,6 +2,7 @@
 # matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 # plt.ioff()  # Turn off interactive mode
+import colorsys
 import numpy as np
 import os
 from spicelib.editor.base_editor import format_eng, scan_eng
@@ -446,28 +447,38 @@ def generate_multiparam_heat_maps(params_to_plot, meas_res, explicit_wfms=[], sk
             plt.savefig(plot_path)
             plt.close()
 
-def plot_wfm_2param(params_to_plot, meas_res, explicit_wfms=[], skip_branches=None, base_config=None,
-                    edge=None, swap_axes=False, save_figs=True):
-    """2-param sweep waveforms: one subplot per device (column) and waveform (row). Line colour encodes
-    the first swept parameter (colour bar) and line width the second (small legend), so even a 10x10 grid
-    needs no per-run legend. swap_axes exchanges the two encodings.
-    skip_branches: device numbers to leave out (ints). edge: 'rise' / 'fall' zooms 100 ns on that edge
-    of the 2nd period (needs base_config), None shows the full simulation."""
+def _edge_window(base_config, dev, edge):
+    """(t_start, t_window, t_scale, t_unit) for a 100 ns zoom on the rise/fall edge of the 2nd period of
+    device dev, or the full simulation in µs when edge is None or base_config is missing."""
+    if edge in ('rise', 'fall') and base_config is not None:
+        t_start = base_config[f"Vdrive_delay_{dev}"] + base_config[f"T_sw_{dev}"]
+        if edge == 'fall':
+            t_start += base_config[f"tdrv_rise_{dev}"] + base_config[f"D_on_{dev}"] * base_config[f"T_sw_{dev}"]
+        return t_start, (t_start, t_start + 100e-9), 1e9, 'ns'
+    return 0.0, None, 1e6, 'µs'
+
+def _stepped_colorbar(fig, axes, colors, values, label):
+    """Colour bar with one step per value of a swept parameter (values sorted, colors in the same order)."""
+    cmap = plt.matplotlib.colors.ListedColormap(colors)
+    norm = plt.matplotlib.colors.BoundaryNorm(np.arange(len(values) + 1), cmap.N)
+    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=axes, label=label,
+                        ticks=np.arange(len(values)) + 0.5)
+    cbar.ax.set_yticklabels([short_eng(v) for v in values])
+
+def _select_2param_waveforms(params_to_plot, meas_res, explicit_wfms, skip_branches, swap_axes):
+    """Runs of a 2-param grid (base run left out) and what to plot of them: the two params (swapped if
+    asked), the sorted values of each, the device numbers and the waveform types ('i_drain', ...)."""
     if len(params_to_plot) != 2:
         raise ValueError("Select exactly two swept parameters in params_to_plot")
-    p_color, p_width = reversed(params_to_plot) if swap_axes else params_to_plot
+    p_a, p_b = reversed(params_to_plot) if swap_axes else params_to_plot
     runs = [e for e in meas_res.values()
-            if p_color in e.get('config_changes', {}) and p_width in e.get('config_changes', {})]
+            if p_a in e.get('config_changes', {}) and p_b in e.get('config_changes', {})]
     if not runs:
-        raise ValueError(f"No runs vary both {p_color} and {p_width}")
+        raise ValueError(f"No runs vary both {p_a} and {p_b}")
+    a_vals = sorted({e['config_changes'][p_a] for e in runs})
+    b_vals = sorted({e['config_changes'][p_b] for e in runs})
 
-    color_vals = sorted({e['config_changes'][p_color] for e in runs})
-    width_vals = sorted({e['config_changes'][p_width] for e in runs})
-    # Colours and widths go by rank, so log-spaced sweeps are spread evenly too
-    colors = plt.cm.viridis(np.linspace(0, 0.9, len(color_vals)))
-    widths = np.linspace(0.7, 3.5, len(width_vals)) if len(width_vals) > 1 else [1.5]
-
-    # Waveform names like 'i_drain_3': rows by waveform, columns by device
+    # Waveform names like 'i_drain_3'
     wfm_names = [k for k in runs[0].get('waveforms', {}) if k != 'time']
     if explicit_wfms:
         wfm_names = [k for k in wfm_names if k.rsplit('_', 1)[0] in explicit_wfms]
@@ -475,30 +486,90 @@ def plot_wfm_2param(params_to_plot, meas_res, explicit_wfms=[], skip_branches=No
     wfm_types = sorted({k.rsplit('_', 1)[0] for k in wfm_names})
     if not devices or not wfm_types:
         raise ValueError("No waveforms left to plot")
+    return p_a, p_b, runs, a_vals, b_vals, devices, wfm_types
 
-    fig, axes = plt.subplots(len(wfm_types), len(devices), figsize=(4.5 * len(devices) + 2, 3.2 * len(wfm_types)),
-                             sharex=True, squeeze=False, layout='constrained')
-    # Thick lines first so the thin ones stay visible on top
-    draw_order = sorted(runs, key=lambda e: -width_vals.index(e['config_changes'][p_width]))
-    for col, dev in enumerate(devices):
-        if edge in ('rise', 'fall') and base_config is not None:
-            t_start = base_config[f"Vdrive_delay_{dev}"] + base_config[f"T_sw_{dev}"]
-            if edge == 'fall':
-                t_start += base_config[f"tdrv_rise_{dev}"] + base_config[f"D_on_{dev}"] * base_config[f"T_sw_{dev}"]
-            t_window, t_scale, t_unit = (t_start, t_start + 100e-9), 1e9, 'ns'
+def _connect_2param_highlight(fig, axes, key_ax, run_lines, colors, hue_vals, light_vals, p_hue, p_light):
+    """Click a curve or a colour key swatch to highlight that run in every subplot and grey out the rest;
+    click the same run again, or empty plot space, to restore all colours."""
+    frame = plt.Rectangle((-0.5, -0.5), 1, 1, fill=False, ec='black', lw=2.5, visible=False)
+    key_ax.add_patch(frame)
+    plot_axes = set(axes.flat)
+    selected = [None]
+
+    def select(cell):
+        selected[0] = None if cell == selected[0] else cell
+        for other_cell, lines in run_lines.items():
+            for line in lines:
+                if selected[0] is None:
+                    line.set(color=colors[other_cell], lw=1.3, alpha=0.9, zorder=2)
+                elif other_cell == selected[0]:
+                    line.set(color=colors[other_cell], lw=2.5, alpha=1.0, zorder=3)
+                else:
+                    line.set(color='0.75', lw=1.0, alpha=0.35, zorder=2)
+        frame.set_visible(selected[0] is not None)
+        if selected[0] is not None:
+            light_i, hue_i = selected[0]
+            frame.set_xy((hue_i - 0.5, light_i - 0.5))
+            key_ax.set_title(f'{friendly_name(p_hue)}={short_eng(hue_vals[hue_i])}\n'
+                             f'{friendly_name(p_light)}={short_eng(light_vals[light_i])}', fontsize=9)
         else:
-            t_start, t_window, t_scale, t_unit = 0.0, None, 1e6, 'µs'
+            key_ax.set_title('Colour key')
+        fig.canvas.draw_idle()
 
+    def on_click(event):
+        toolbar = getattr(fig.canvas, 'toolbar', None)
+        if event.button != 1 or (toolbar is not None and toolbar.mode):
+            return  # leave zoom / pan clicks alone
+        if event.inaxes is key_ax and event.xdata is not None:
+            cell = (int(round(event.ydata)), int(round(event.xdata)))
+            if cell in run_lines:
+                select(cell)
+        elif event.inaxes in plot_axes:
+            # Topmost curve under the cursor: the highlighted one if it was hit, else the last drawn
+            hits = [cell for cell, lines in run_lines.items() for line in lines
+                    if line.axes is event.inaxes and line.contains(event)[0]]
+            if selected[0] in hits:
+                select(selected[0])
+            elif hits:
+                select(hits[-1])
+            elif selected[0] is not None:
+                select(selected[0])  # empty space: clear
+
+    fig.canvas.mpl_connect('button_press_event', on_click)
+
+def plot_wfm_2param(params_to_plot, meas_res, explicit_wfms=[], skip_branches=None, base_config=None,
+                    edge=None, swap_axes=False, save_figs=True):
+    """2-param sweep waveforms: one subplot per device (column) and waveform (row). Line hue encodes the
+    first swept parameter and lightness the second (dark = smallest value), read off a 2D colour key, so
+    even a 10x10 grid needs no per-run legend. swap_axes exchanges the two encodings.
+    skip_branches: device numbers to leave out (ints). edge: 'rise' / 'fall' zooms 100 ns on that edge
+    of the 2nd period (needs base_config), None shows the full simulation."""
+    p_hue, p_light, runs, hue_vals, light_vals, devices, wfm_types = _select_2param_waveforms(
+        params_to_plot, meas_res, explicit_wfms, skip_branches, swap_axes)
+    # Hue and lightness go by rank, so log-spaced sweeps are spread evenly too. Hues stop short of the
+    # full circle so the last one doesn't wrap back to red.
+    hues = np.linspace(0, 0.8, len(hue_vals))
+    lights = np.linspace(0.22, 0.72, len(light_vals)) if len(light_vals) > 1 else [0.45]
+    colors = np.array([[colorsys.hls_to_rgb(h, l, 0.85) for h in hues] for l in lights])  # [light, hue, rgb]
+
+    # Rows by waveform, columns by device; the colour key gets its own narrow subfigure
+    fig = plt.figure(figsize=(4.5 * len(devices) + 3, 3.2 * len(wfm_types) + 0.8), layout='constrained')
+    plot_fig, key_fig = fig.subfigures(1, 2, width_ratios=[4.5 * len(devices), 3])
+    axes = plot_fig.subplots(len(wfm_types), len(devices), sharex=True, squeeze=False)
+    run_lines = {}  # (light index, hue index) -> its line in every subplot, for click highlighting
+    for col, dev in enumerate(devices):
+        t_start, t_window, t_scale, t_unit = _edge_window(base_config, dev, edge)
         for row, wfm_type in enumerate(wfm_types):
             ax = axes[row, col]
             name = f'{wfm_type}_{dev}'
             y_min, y_max = float('inf'), float('-inf')
-            for entry in draw_order:
+            for entry in runs:
                 t = np.asarray(entry['waveforms']['time'])
                 y = np.asarray(entry['waveforms'][name])
                 changes = entry['config_changes']
-                ax.plot((t - t_start) * t_scale, y, color=colors[color_vals.index(changes[p_color])],
-                        lw=widths[width_vals.index(changes[p_width])], alpha=0.85)
+                cell = (light_vals.index(changes[p_light]), hue_vals.index(changes[p_hue]))
+                line, = ax.plot((t - t_start) * t_scale, y, color=colors[cell], lw=1.3, alpha=0.9, pickradius=4)
+                run_lines.setdefault(cell, []).append(line)
                 in_window = (t >= t_window[0]) & (t <= t_window[1]) if t_window else slice(None)
                 if y[in_window].size:
                     y_min, y_max = min(y_min, y[in_window].min()), max(y_max, y[in_window].max())
@@ -512,17 +583,15 @@ def plot_wfm_2param(params_to_plot, meas_res, explicit_wfms=[], skip_branches=No
             if row == len(wfm_types) - 1:
                 ax.set_xlabel(f'Time [{t_unit}]' + (f' from {edge} edge' if t_window else ''))
 
-    # Colour bar with one step per value of the colour parameter
-    cmap = plt.matplotlib.colors.ListedColormap(colors)
-    norm = plt.matplotlib.colors.BoundaryNorm(np.arange(len(color_vals) + 1), cmap.N)
-    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=axes, label=friendly_name(p_color),
-                        ticks=np.arange(len(color_vals)) + 0.5)
-    cbar.ax.set_yticklabels([short_eng(v) for v in color_vals])
-    # Line width legend: one grey sample per value of the width parameter
-    handles = [plt.Line2D([], [], color='0.3', lw=w) for w in widths]
-    fig.legend(handles, [short_eng(v) for v in width_vals], title=f'Line width: {friendly_name(p_width)}',
-               loc='outside lower center', ncols=min(len(width_vals), 10))
-    title = (f'{", ".join(wfm_types)} over {friendly_name(p_color)} x {friendly_name(p_width)}'
+    # 2D colour key: one swatch per (hue, lightness) pair, smallest lightness value on top
+    key_ax = key_fig.subplots()
+    key_ax.imshow(colors, aspect='equal')
+    key_ax.set_xticks(range(len(hue_vals)), [short_eng(v) for v in hue_vals], rotation=90, fontsize=8)
+    key_ax.set_yticks(range(len(light_vals)), [short_eng(v) for v in light_vals], fontsize=8)
+    key_ax.set(xlabel=f'Hue: {friendly_name(p_hue)}', ylabel=f'Lightness: {friendly_name(p_light)}',
+               title='Colour key')
+    _connect_2param_highlight(fig, axes, key_ax, run_lines, colors, hue_vals, light_vals, p_hue, p_light)
+    title = (f'{", ".join(wfm_types)} over {friendly_name(p_hue)} x {friendly_name(p_light)}'
              f'{f": {edge} edge zoom" if t_window else ""}')
     fig.suptitle(title)
 
@@ -531,6 +600,67 @@ def plot_wfm_2param(params_to_plot, meas_res, explicit_wfms=[], skip_branches=No
     else:
         output_folder = './plots'
         os.makedirs(output_folder, exist_ok=True)
-        plot_path = os.path.join(output_folder, f'wfm_2param_{p_color}_{p_width}_{edge or "full"}.png')
+        plot_path = os.path.join(output_folder, f'wfm_2param_{p_hue}_{p_light}_{edge or "full"}.png')
         plt.savefig(plot_path)
         plt.close()
+
+def plot_wfm_2param_3d(params_to_plot, meas_res, explicit_wfms=[], skip_branches=None, base_config=None,
+                       edge=None, swap_axes=False, fill=True, save_figs=True):
+    """2-param sweep waveforms as a 3D waterfall: one figure per waveform, one 3D subplot per device.
+    x = time, z = waveform value, depth (y) = second swept param, colour = first param (colour bar).
+    fill shades a translucent ribbon under each curve so the depth slices read as surfaces.
+    swap_axes exchanges the two params. skip_branches / edge as in plot_wfm_2param."""
+    p_color, p_depth, runs, color_vals, depth_vals, devices, wfm_types = _select_2param_waveforms(
+        params_to_plot, meas_res, explicit_wfms, skip_branches, swap_axes)
+    colors = plt.cm.viridis(np.linspace(0, 0.9, len(color_vals)))
+
+    n_cols = int(np.ceil(np.sqrt(len(devices))))  # near-square grid: 3D panels need the room
+    n_rows = -(-len(devices) // n_cols)
+    for wfm_type in wfm_types:
+        # No constrained layout: it collapses 3D axes
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6.5 * n_cols + 1.5, 5.5 * n_rows), squeeze=False,
+                                 subplot_kw={'projection': '3d'})
+        for ax in axes.flat[len(devices):]:
+            ax.remove()
+        for ax, dev in zip(axes.flat, devices):
+            t_start, t_window, t_scale, t_unit = _edge_window(base_config, dev, edge)
+            name = f'{wfm_type}_{dev}'
+            curves = []
+            for entry in runs:
+                t = np.asarray(entry['waveforms']['time'])
+                y = np.asarray(entry['waveforms'][name])
+                if t_window:  # 3D axes don't clip to their limits, so crop the data instead
+                    in_window = (t >= t_window[0]) & (t <= t_window[1])
+                    t, y = t[in_window], y[in_window]
+                if t.size:
+                    changes = entry['config_changes']
+                    curves.append(((t - t_start) * t_scale, y, depth_vals.index(changes[p_depth]),
+                                   colors[color_vals.index(changes[p_color])]))
+            if not curves:
+                continue
+            # Depth by rank, so log-spaced sweeps are spread evenly too. Ribbons go down to 0 (or the
+            # nearest data limit) and stay faint, since a depth slice stacks one ribbon per colour.
+            z_min, z_max = min(y.min() for _, y, _, _ in curves), max(y.max() for _, y, _, _ in curves)
+            z_base = min(max(0.0, z_min), z_max)
+            for x, y, depth, color in curves:
+                if fill:
+                    ax.fill_between(x, depth, y, x, depth, z_base, color=color, alpha=0.6 / len(color_vals),
+                                    linewidth=0)
+                ax.plot(x, np.full_like(x, depth), y, color=color, lw=1.1, alpha=0.9)
+            ax.set_yticks(range(len(depth_vals)), [short_eng(v) for v in depth_vals], fontsize=7)
+            ax.set(title=name, xlabel=f'Time [{t_unit}]' + (f' from {edge} edge' if t_window else ''),
+                   ylabel=friendly_name(p_depth), zlabel=labeltexts.get(wfm_type[0].lower(), ''))
+            ax.set_box_aspect((2, 1.3, 1), zoom=0.9)
+            ax.view_init(elev=22, azim=-55)
+        _stepped_colorbar(fig, list(axes.flat[:len(devices)]), colors, color_vals, friendly_name(p_color))
+        fig.suptitle(f'{wfm_type} over {friendly_name(p_color)} (colour) x {friendly_name(p_depth)} (depth)'
+                     f'{f": {edge} edge zoom" if edge in ("rise", "fall") and base_config is not None else ""}')
+
+        if not save_figs:
+            plt.show()
+        else:
+            output_folder = './plots'
+            os.makedirs(output_folder, exist_ok=True)
+            plot_path = os.path.join(output_folder, f'wfm_2param_3d_{wfm_type}_{p_color}_{p_depth}_{edge or "full"}.png')
+            plt.savefig(plot_path)
+            plt.close()

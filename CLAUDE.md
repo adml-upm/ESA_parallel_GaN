@@ -95,7 +95,7 @@ Put new logic in `SimWorkflow.py`, or in `LtSimConfiguration` / `ResultPlotting`
 
 **Tab 2, Plots.** It is a generic editor over `SimWorkflow.PLOTS`:
 
-- 2-param studies get `generate_multiparam_heat_maps` (KPI over the grid, one heat map per device) and `plot_wfm_2param` (colour = first param with a stepped colour bar, line width = second param; `swap_axes` exchanges them). `plot_wfm_from_all_runs` (one legend entry per run) is only offered for sweep/perturbation.
+- 2-param studies get `generate_multiparam_heat_maps` (KPI over the grid, one heat map per device) and `plot_wfm_2param` (hue = first param, lightness = second param, read off a 2D colour key; `swap_axes` exchanges them; clicking a curve or a key swatch highlights that run in every subplot and greys out the rest) and `plot_wfm_2param_3d` (3D waterfall per waveform: x = time, depth = second param, colour = first param, optional translucent `fill` ribbons; 3D axes don't clip, so the edge window crops the data). `plot_wfm_from_all_runs` (one legend entry per run) is only offered for sweep/perturbation.
 - After a 2-param (multiparam) study, `run_study` also writes `results/<asc stem>_multiparam_<timestamp>.csv` with `export_meas_csv`: one row per run (base run first), columns = the two parameter values, then every `.meas` value. The path is in `StudyResult.meas_csv`.
 - *Save results as...* / *Load results...* pickle the whole `StudyResult` to `results/` (gitignored) with `save_result` / `load_result`, so plots can be redone without simulating.
 - `StudyResult` also carries a time breakdown (`sim_s`, `longest_sim_s`, `read_s`), shown in the summary line.

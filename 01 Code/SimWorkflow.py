@@ -27,7 +27,7 @@ from spicelib.editor.base_editor import scan_eng
 from SimConfiguration import LtSimConfiguration
 from ResultPlotting import (generate_sweep_plots, generate_perturbation_barplots,
                             generate_perturbation_heat_map, generate_multiparam_heat_maps,
-                            plot_wfm_from_all_runs, plot_wfm_2param, friendly_name)
+                            plot_wfm_from_all_runs, plot_wfm_2param, plot_wfm_2param_3d, friendly_name)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SIM_PATH = REPO_ROOT / "02 Simulations" / "02 ParallelGaN" / "ParGan_V4.asc"
@@ -461,12 +461,16 @@ PLOTS = [
     PlotSpec('plot_wfm_2param', 'Waveforms over the 2-param grid (edge zoom)', plot_wfm_2param, ('multiparam',),
              "Colour = first param (colour bar), line width = second param. swap_axes exchanges them. "
              "Empty explicit_wfms = all."),
+    PlotSpec('plot_wfm_2param_3d', '3D waterfall of waveforms over the 2-param grid', plot_wfm_2param_3d,
+             ('multiparam',),
+             "One figure per waveform. Colour = first param, depth = second param. swap_axes exchanges them; "
+             "fill shades translucent ribbons under the curves."),
     PlotSpec('plot_wfm_from_all_runs', 'Waveforms of all runs (edge zoom)', plot_wfm_from_all_runs,
              ('sweep', 'perturbation'),
              "Overlays derived per-device waveforms, base run excluded. Empty explicit_wfms = all."),
 ]
 AUTO_ARGS = ('meas_res', 'base_config')
-WAVEFORM_PLOTS = ('plot_wfm_from_all_runs', 'plot_wfm_2param')  # take waveform names and int skip_branches
+WAVEFORM_PLOTS = ('plot_wfm_from_all_runs', 'plot_wfm_2param', 'plot_wfm_2param_3d')  # take waveform names and int skip_branches
 
 
 def _get_plot(plot_name: str) -> PlotSpec:
@@ -516,6 +520,8 @@ def plot_args(result: StudyResult, plot_name: str) -> list[PlotArg]:
             args.append(PlotArg(name, 'bool', False, help="Exchange the roles of the two swept parameters"))
         elif name == 'save_figs':
             args.append(PlotArg(name, 'bool', False, help="Save PNGs to plots/ instead of opening windows"))
+        elif name == 'fill':
+            args.append(PlotArg(name, 'bool', param.default, help="Shade translucent ribbons under the curves"))
         elif name == 'k_perturb':
             args.append(PlotArg(name, 'text', str(result.k_perturb), help="Perturbation shown in the title (p.u.)"))
         else:  # argument added to ResultPlotting later: plain text field
